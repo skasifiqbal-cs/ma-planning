@@ -1,0 +1,3 @@
+pyperplan
+sentence-transformers
+requests

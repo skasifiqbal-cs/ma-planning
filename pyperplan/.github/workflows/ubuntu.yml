@@ -1,0 +1,48 @@
+name: Ubuntu
+
+# see https://github.community/t5/GitHub-Actions/How-to-trigger-an-action-on-push-or-pull-request-but-not-both/m-p/35805
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+    branches:
+    - main
+
+jobs:
+  build:
+
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-20.04, ubuntu-22.04]
+        python-version: [3.7, 3.8, 3.9, '3.10', '3.11', '3.12', '3.13']
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        allow-prereleases: true
+
+    - name: Show environment
+      run: |
+        python --version
+        python3 -c "import multiprocessing as m; print('CPUs:', m.cpu_count())"
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get -y install minisat python3-pip tox
+
+    - name: Check style
+      if: matrix.os == 'ubuntu-22.04' && matrix.python-version == '3.12'
+      run: |
+        tox -e style
+
+    - name: Run tests
+      run: |
+        tox -e py,slow
