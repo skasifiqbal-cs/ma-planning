@@ -47,7 +47,7 @@ class Config:
         self.debug = True
 
         # Default temperature value
-        self.temperature = 0.1
+        self.temperature = 0.7
 
         # Add more options as needed for batch jobs, logging, etc.
 

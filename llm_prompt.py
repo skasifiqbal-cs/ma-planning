@@ -1,47 +1,87 @@
 import requests
-from config import Config  # Import the Config class
+import json
+from typing import Optional
+from config import Config
 
 
 class LLMPrompt:
+    """
+    Wrapper for an Ollama-compatible /api/chat endpoint.
+    - Forces non-streaming responses (stream: false).
+    - If config.debug is True, prints the payload (including the user prompt) before sending.
+    """
+
     def __init__(self, config: Config):
-        """Initialize the LLM prompt settings using the provided Config instance."""
         self.model = config.llm_model
         self.url = config.llm_url
-        self.temperature = config.temperature
-        self.num_completions = getattr(config, "num_completions", 1)
+        self.temperature = getattr(config, "temperature", 0.1)
+        self.max_tokens = getattr(config, "max_tokens", 128)
+        self.request_timeout = 300
+        self.debug = getattr(config, "debug", False)
 
-    def prompt(self, input_prompt: str) -> str:
-        """Send a prompt to the LLM server and handle tokenized streaming responses."""
+    def chat(
+        self, user_content: str, system_content: Optional[str] = None
+    ) -> Optional[str]:
+        if system_content is None:
+            system_content = "You are a PDDL planning assistant. Respond ONLY with one valid grounded action. No explanations."
+
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": input_prompt},
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content},
             ],
             "temperature": self.temperature,
-            "max_tokens": 10000,
+            "max_tokens": self.max_tokens,
+            "stream": False,
         }
 
+        if self.debug:
+            print("\n[DEBUG] LLM REQUEST")
+            print(f"POST {self.url}")
+            print(
+                f"model: {self.model}, temperature: {self.temperature}, max_tokens: {self.max_tokens}, stream: False"
+            )
+            print("---- SYSTEM ----")
+            print(system_content)
+            print("---- USER PROMPT ----")
+            print(user_content)
+            print("---- END PROMPT ----\n")
+
         try:
-            # Send the request to the LLM server
-            with requests.post(self.url, json=payload, stream=True, timeout=60) as resp:
-                resp.raise_for_status()  # Raise HTTPError for bad HTTP responses
+            resp = requests.post(self.url, json=payload, timeout=self.request_timeout)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            print(f"[ERROR] LLM request failed: {e}")
+            return None
 
-                # Aggregate the "content" fields from streamed messages
-                full_response = ""
-                for line in resp.iter_lines(decode_unicode=True):
-                    if line:
-                        try:
-                            message = eval(line)  # Parse JSON-like string
-                            content = message.get("message", {}).get("content", "")
-                            full_response += content
-                        except Exception:
-                            continue  # Ignore invalid lines
-                return full_response.strip()
+        # Prefer structured; if fails, return raw text
+        try:
+            data = resp.json()
+            content = None
+            if isinstance(data, dict):
+                msg = data.get("message")
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                if content is None:
+                    choices = data.get("choices")
+                    if isinstance(choices, list) and choices:
+                        content = (choices[0].get("message") or {}).get("content")
+            if not content:
+                content = resp.text
+            return (content or "").strip() or None
+        except json.JSONDecodeError:
+            return (resp.text or "").strip() or None
 
-        except requests.exceptions.HTTPError as e:
-            print(f"[ERROR] HTTP Error ({resp.status_code}): {resp.text}")
-            raise
-        except Exception as e:
-            print(f"[ERROR] Unexpected error: {str(e)}")
-            raise
+    @staticmethod
+    def extract_first_action(text: str) -> str | None:
+        # A simple heuristic: first balanced parenthesized expression
+        # If your actions always look like (op arg1 arg2 ...), this is sufficient.
+        s = (text or "").strip()
+        start = s.find("(")
+        end = s.find(")", start + 1)
+        if start != -1 and end != -1:
+            return s[start : end + 1].strip()
+        # Fallback to first line
+        line = s.splitlines()[0].strip() if s else ""
+        return line or None

@@ -1,9 +1,10 @@
+import logging
+import re
+from pathlib import Path
 from centralize_ma import MAPDDLConverter
-from llm_prompt import LLMPrompt  # Updated import
+from llm_prompt import LLMPrompt
 from ground_actions import ActionGrounder
 from validation import Validator
-from pathlib import Path
-import logging
 
 
 class MAPLLMPipeline:
@@ -14,7 +15,6 @@ class MAPLLMPipeline:
             config.converter["python_cmd"],
             config.centralized_root,
         )
-        # Initialize LLMPrompt with the Config instance
         self.prompt = LLMPrompt(config)
         self.validator = Validator(config.val_bin)
 
@@ -22,102 +22,144 @@ class MAPLLMPipeline:
         if not max_steps:
             max_steps = self.config.max_steps
 
-        # Centralize the PDDL domain/problem files
         centralized_domain, centralized_problem = self.converter.convert(
             domain_dir, domain_file, problem_file
         )
         print("[INFO] Centralized files:", centralized_domain, centralized_problem)
 
-        # Handle no-val separately from other modes
         if mode == "no-val":
             plan = self._autoregressive_plan_no_val(
                 centralized_domain, centralized_problem, max_steps
             )
         else:
-            raise NotImplementedError(
-                "[ERROR] Only 'no-val' mode is implemented right now."
-            )
+            raise NotImplementedError("Only 'no-val' mode implemented.")
 
-        # Final validated plan
         print("\n[RESULT] Final generated plan:")
-        for i, action in enumerate(plan):
-            print(f"{i}: {action}")
+        for i, act in enumerate(plan):
+            print(f"{i}: {act}")
 
-    def _prompt_autoregressive(self, prompt: str, task: dict, max_loops: int) -> list:
-        """Prompt the LLM for one action at a time, handling plain text responses."""
-        # Ground the task and initialize operators
-        grounder = ActionGrounder(task["domain_file"], task["problem_file"])
-        pyperplan_task = grounder.task
-        ground_ops = {o.name: o for o in pyperplan_task.operators}
-        current_facts = pyperplan_task.initial_state
-
-        plan = []  # A growing list of valid actions
-        sep = "\n"  # Default separator for prompt updates
-
-        # Iteratively query the LLM for max_loops times
-        for _ in range(max_loops):
-            # Query the LLM for the next action
-            response = self._query_llm(prompt)
-            if not response:
-                print("[WARN] LLM returned an empty response.")
-                break
-
-            # Parse action from plain text response
-            action = response.strip()
-            logging.info(f"[DEBUG] LLM Suggested Action: {action}")
-
-            # Validate Action Applicability
-            if action not in ground_ops or not ground_ops[action].applicable(
-                current_facts
-            ):
-                print(f"[WARN] Action '{action}' is invalid. Prompting LLM to redo.")
-                prompt = (
-                    prompt
-                    + f"\n[NOTE]: Action '{action}' is invalid. Please suggest a valid next action."
-                )
-                response = self._query_llm(prompt)  # Ask the LLM to retry
-                if not response or response.strip() not in ground_ops:
-                    print("[ERROR] LLM failed to generate a valid action. Exiting.")
-                    break
-                action = response.strip()
-
-            # Apply the action and update the prompt
-            ground_op = ground_ops[action]
-            current_facts = ground_op.apply(current_facts)
-            plan.append(action)  # Add to the plan
-            prompt += sep + action  # Update the prompt with the latest action
-
-        return plan
+    def _print_prompt(self, text: str, tag: str):
+        if getattr(self.config, "debug", False):
+            print(f"\n===== {tag} BEGIN =====")
+            print(text)
+            print(f"===== {tag} END =====\n")
 
     def _autoregressive_plan_no_val(
         self, domain_file: str, problem_file: str, max_steps: int
     ):
-        """Simple autoregressive plan generation for no-val mode."""
-        task = {"domain_file": domain_file, "problem_file": problem_file}
-        prompt = self._prepare_prompt(domain_file, problem_file, [])
-        return self._prompt_autoregressive(prompt, task, max_steps)
+        grounder = ActionGrounder(domain_file, problem_file)
+        task = grounder.task
+        ground_ops = {op.name: op for op in task.operators}
 
-    def _prepare_prompt(self, domain_file: str, problem_file: str, plan: list) -> str:
-        """Prepare the LLM prompt based on the domain/problem context and the current validated plan."""
-        plan_str = "\n".join(f"{i}: {action}" for i, action in enumerate(plan))
-        domain_content = Path(domain_file).read_text()
-        problem_content = Path(problem_file).read_text()
+        current_facts = task.initial_state
+        plan: list[str] = []
+
+        for step in range(max_steps):
+            applicable = [
+                name for name, op in ground_ops.items() if op.applicable(current_facts)
+            ]
+            if not applicable:
+                print("[INFO] No applicable actions remain. Stopping.")
+                break
+
+            user_prompt = self._build_llm_prompt(
+                domain_file, problem_file, plan, applicable, retry=False
+            )
+            self._print_prompt(user_prompt, f"LLM PROMPT (step {step})")
+            raw_response = self.prompt.chat(user_prompt)
+
+            if not raw_response:
+                print("[WARN] LLM returned empty response. Stopping.")
+                break
+
+            action = LLMPrompt.extract_first_action(raw_response)
+            logging.debug(f"[DEBUG] Raw LLM response: {raw_response}")
+            logging.debug(f"[DEBUG] Parsed action: {action}")
+
+            # Validate grounding & applicability
+            if (
+                not action
+                or action not in ground_ops
+                or not ground_ops[action].applicable(current_facts)
+            ):
+                print(f"[WARN] Invalid action from LLM: {action or raw_response!r}")
+                # Retry ONCE with explicit invalid notice
+                retry_prompt = self._build_llm_prompt(
+                    domain_file,
+                    problem_file,
+                    plan,
+                    applicable,
+                    retry=True,
+                    invalid_action=action or raw_response,
+                )
+                self._print_prompt(retry_prompt, f"LLM PROMPT RETRY (step {step})")
+                retry_response = self.prompt.chat(retry_prompt)
+                if not retry_response:
+                    print("[ERROR] Retry also returned empty. Aborting.")
+                    break
+                action = LLMPrompt.extract_first_action(retry_response)
+                logging.debug(f"[DEBUG] Retry raw response: {retry_response}")
+                logging.debug(f"[DEBUG] Retry parsed action: {action}")
+                if (
+                    not action
+                    or action not in ground_ops
+                    or not ground_ops[action].applicable(current_facts)
+                ):
+                    print(
+                        f"[ERROR] Retry produced invalid action: {action or retry_response!r}. Aborting."
+                    )
+                    break
+
+            # Apply valid action
+            ground_op = ground_ops[action]
+            current_facts = ground_op.apply(current_facts)
+            plan.append(action)
+            print(f"[STEP {step}] Added action: {action}")
+
+        return plan
+
+    def _build_llm_prompt(
+        self,
+        domain_file: str,
+        problem_file: str,
+        plan: list[str],
+        applicable_actions: list[str],
+        retry: bool,
+        invalid_action: str | None = None,
+    ) -> str:
+        # Minimize size: we don't need the entire domain every step; truncate.
+        domain_txt = Path(domain_file).read_text()
+        # domain_txt = ""
+
+        problem_txt = Path(problem_file).read_text()
+        # Optional truncation if huge
+        # max_chars = 4000
+        # if len(domain_txt) > max_chars:
+        #     domain_txt = domain_txt[:max_chars] + "\n... [truncated]"
+        # if len(problem_txt) > max_chars:
+        #     problem_txt = problem_txt[:max_chars] + "\n... [truncated]"
+
+        plan_section = "\n".join(plan) if plan else "(empty)"
+        applicable_section = "\n".join(applicable_actions)
+
+        base_instr = (
+            "Return EXACTLY ONE next grounded action which is valid from the domain description.\n"
+            "Format: (operator arg1 arg2 ...)\n"
+            "Do NOT explain. Do NOT output anything else."
+        )
+
+        if retry and invalid_action:
+            instr = f"{invalid_action} is wrong try something else\n{base_instr}"
+        else:
+            instr = base_instr
+
+        # prompt = (
+        #     f"{instr}\n\nDOMAIN:\n{domain_txt}\n\nPROBLEM:\n{problem_txt}\n\n"
+        #     f"CURRENT PLAN:\n{plan_section}\n\nAPPLICABLE ACTIONS:\n{applicable_section}\n\nNEXT ACTION:"
+        # )
 
         prompt = (
-            "You are a PDDL planner assisting in generating a valid task plan.\n"
-            "DOMAIN:\n"
-            + domain_content
-            + "\nPROBLEM:\n"
-            + problem_content
-            + "\nCURRENT PLAN:\n"
-            + plan_str
-            + "\nNEXT ACTION:"
+            f"{instr}\n\nDOMAIN:\n{domain_txt}\n\nPROBLEM:\n{problem_txt}\n\n"
+            f"CURRENT PLAN:\n{plan_section}\n\nNEXT ACTION:"
         )
         return prompt
-
-    def _query_llm(self, prompt: str) -> str:
-        """Query the LLM for the next action, handling plain text responses."""
-        response = self.prompt.prompt(prompt)
-        if response:
-            return response.strip()  # Process plain text response
-        return ""
