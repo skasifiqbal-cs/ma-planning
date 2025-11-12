@@ -46,6 +46,9 @@ class Config:
         # Debug flag for verbose output/logging
         self.debug = True
 
+        # Default temperature value
+        self.temperature = 0.1
+
         # Add more options as needed for batch jobs, logging, etc.
 
     def as_dict(self):
