@@ -6,6 +6,7 @@ from pathlib import Path
 from config import Config
 from planner import MAPLLMPipeline
 from evaluation import PlanEvaluator
+from evaluation_summary import write_eval_summary
 
 
 def _stem(name: str) -> str:
@@ -74,6 +75,7 @@ def run_batch(config: Config, args) -> None:
     rows: list[str] = []
     passed = 0
     total = 0
+    eval_results: list[dict] = []  # for eval/<domain>.json
 
     for prob in problems:
         prob_base = _stem(prob)
@@ -93,6 +95,7 @@ def run_batch(config: Config, args) -> None:
             ok = evaluator.evaluate(
                 str(centralized_domain), str(centralized_problem), str(plan_path)
             )
+            eval_results.append({"problem": prob_base, "passed": bool(ok)})
             status = "PASSED" if ok else "FAILED"
             total += 1
             if ok:
@@ -140,6 +143,9 @@ def run_batch(config: Config, args) -> None:
 
         print(f"[INFO] Summary CSV: {csv_path}")
         print(f"[INFO] Summary JSON: {json_path}")
+
+        # Write compact eval summary to eval/<domain>.json
+        write_eval_summary(args.domain_dir, eval_results, extension="json")
 
 
 def main():

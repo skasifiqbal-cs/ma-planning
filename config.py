@@ -1,58 +1,259 @@
+"""
+Configuration module for the ma-planning pipeline.
+
+Features:
+- Environment variable overrides (highest precedence before runtime CLI overrides).
+- Automatic tool path resolution (Validate, python interpreter).
+- Auto-detection / fallback for a misspelled converter folder ('centalized' vs 'centralized').
+- Safe reuse of existing centralized/output directories.
+- Simple serialization with as_dict().
+- One-step resolve() that must be called before using external tools.
+
+Environment Variables (override defaults):
+  MAP_PLANNING_CONVERTER_SCRIPT
+  MAP_PLANNING_PYTHON_CMD
+  MAP_PLANNING_LLM_MODEL
+  MAP_PLANNING_LLM_URL
+  MAP_PLANNING_VALIDATE_BIN
+  MAP_PLANNING_EMBED_MODEL
+  MAP_PLANNING_VALIDATION_MODE
+  MAP_PLANNING_UNFACTORED_ROOT
+  MAP_PLANNING_CENTRALIZED_ROOT
+  MAP_PLANNING_RESULTS_ROOT
+  MAP_PLANNING_MAX_STEPS
+  MAP_PLANNING_PLAN_TIMEOUT
+  MAP_PLANNING_TEMPERATURE
+  MAP_PLANNING_DEBUG   (use "0" or "1")
+
+Typical usage:
+    from config import Config
+    cfg = Config()
+    cfg.resolve()           # validates & resolves paths
+    print(cfg.resolved_val_bin)  # path to Validate binary
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, Any, Optional
+
+
+# ---------- Helper functions ----------
+
+
+def _get_env(name: str, default: Optional[str] = None) -> Optional[str]:
+    """Return non-empty environment variable value or default."""
+    val = os.getenv(name)
+    if val is None:
+        return default
+    val = val.strip()
+    return val if val else default
+
+
+def _to_bool(val: str) -> bool:
+    return val.lower() in {"1", "true", "yes", "on"}
+
+
+# ---------- Config dataclass ----------
+
+
+@dataclass
 class Config:
-    """
-    Global configuration holder for the ma-planning pipeline.
-    Supports extension with command-line arguments or env vars if desired.
-    """
+    # Raw (possibly unresolved) settings. Environment overrides applied at construction.
 
-    def __init__(self):
-        # MAPDDL to PDDL converter settings
-        self.converter = {
-            # Path to ma-to-pddl.py script (update as needed)
-            "converter_script": "/home/rr/ma-planning/codmap-2015/competition/centalized/ma-to-pddl.py",
-            # Command used to run Python 2 for the converter
-            "python_cmd": "python2",
+    # Converter settings: script & python interpreter
+    converter: Dict[str, str] = field(
+        default_factory=lambda: {
+            "converter_script": _get_env(
+                "MAP_PLANNING_CONVERTER_SCRIPT",
+                "/home/rr/ma-planning/codmap-2015/competition/centalized/ma-to-pddl.py",  # note: 'centalized' intentionally kept
+            ),
+            "python_cmd": _get_env("MAP_PLANNING_PYTHON_CMD", "python2"),
         }
+    )
 
-        # LLM model name for Ollama/OpenAI, etc.
-        self.llm_model = "llama3:8b"  # e.g., "llama3", "phi3", "openai/gpt-4", etc.
+    # LLM settings
+    llm_model: str = _get_env("MAP_PLANNING_LLM_MODEL", "llama3:8b")
+    llm_url: str = _get_env("MAP_PLANNING_LLM_URL", "http://localhost:11434/api/chat")
 
-        # URL for LLM API endpoint (default is Ollama local)
-        self.llm_url = "http://localhost:11434/api/chat"
+    # External validator binary (VAL)
+    val_bin: str = _get_env("MAP_PLANNING_VALIDATE_BIN", "Validate")
 
-        # VAL validator binary location (if not in PATH, use absolute path)
-        self.val_bin = "Validate"  # e.g., "/usr/local/bin/Validate"
+    # Embedding model for future soft validation
+    embed_model: str = _get_env("MAP_PLANNING_EMBED_MODEL", "paraphrase-MiniLM-L6-v2")
 
-        # SentenceTransformer embedding model for soft validation
-        self.embed_model = "paraphrase-MiniLM-L6-v2"
+    # Validation mode default
+    validation_mode: str = _get_env("MAP_PLANNING_VALIDATION_MODE", "no-val")
 
-        # Default mode for validation ("strict", "no-val", "soft-val")
-        self.validation_mode = "no-val"
+    # Data roots
+    unfactored_root: str = _get_env(
+        "MAP_PLANNING_UNFACTORED_ROOT",
+        "/home/rr/Downloads/pddl-data-master/codmap-2015/unfactored/",
+    )
+    centralized_root: str = _get_env(
+        "MAP_PLANNING_CENTRALIZED_ROOT", "/home/rr/ma-planning/centralized"
+    )
+    results_root: str = _get_env(
+        "MAP_PLANNING_RESULTS_ROOT", "/home/rr/ma-planning/results"
+    )
 
-        # Directory with unfactored MAPDDL domains/problems
-        self.unfactored_root = (
-            "/home/rr/Downloads/pddl-data-master/codmap-2015/unfactored/"
+    # Planning parameters
+    max_steps: int = int(_get_env("MAP_PLANNING_MAX_STEPS", "30"))
+    plan_timeout: int = int(_get_env("MAP_PLANNING_PLAN_TIMEOUT", "300"))
+
+    # LLM inference parameters
+    temperature: float = float(_get_env("MAP_PLANNING_TEMPERATURE", "0.7"))
+
+    # Debug / verbose flag
+    debug: bool = _to_bool(_get_env("MAP_PLANNING_DEBUG", "1"))
+
+    # ---------- Resolved fields (populated after resolve()) ----------
+    resolved_converter_script: Optional[str] = None
+    resolved_python_cmd: Optional[str] = None
+    resolved_val_bin: Optional[str] = None
+
+    # ---------- Public Methods ----------
+
+    def resolve(self) -> None:
+        """
+        Resolve and validate paths for external tools. Must be called before usage.
+        Steps:
+          - Ensure centralized_root & results_root directories exist.
+          - Resolve converter script path (with fallback search if original path missing).
+          - Resolve python interpreter (which).
+          - Resolve Validate binary (which).
+        Raises RuntimeError / FileNotFoundError on failure.
+        """
+        self._ensure_dirs()
+        self._resolve_converter_script()
+        self.resolved_python_cmd = self._resolve_executable(
+            self.converter["python_cmd"], required=True, label="python_cmd"
+        )
+        self.resolved_val_bin = self._resolve_executable(
+            self.val_bin, required=True, label="Validate"
         )
 
-        # Directory for storing centralized PDDL output files
-        self.centralized_root = "/home/rr/ma-planning/centralized"
+        if self.debug:
+            print("[CONFIG] Resolution complete:")
+            print(f"  converter_script: {self.resolved_converter_script}")
+            print(f"  python_cmd:       {self.resolved_python_cmd}")
+            print(f"  validate_bin:     {self.resolved_val_bin}")
+            print(f"  centralized_root: {self.centralized_root}")
+            print(f"  results_root:     {self.results_root}")
 
-        # Output directory for experiment results/plans
-        self.results_root = "/home/rr/ma-planning/results"
+    def as_dict(self) -> Dict[str, Any]:
+        """Return a dictionary snapshot of all current configuration values + resolved fields."""
+        base = {
+            "converter": self.converter,
+            "llm_model": self.llm_model,
+            "llm_url": self.llm_url,
+            "val_bin": self.val_bin,
+            "embed_model": self.embed_model,
+            "validation_mode": self.validation_mode,
+            "unfactored_root": self.unfactored_root,
+            "centralized_root": self.centralized_root,
+            "results_root": self.results_root,
+            "max_steps": self.max_steps,
+            "plan_timeout": self.plan_timeout,
+            "temperature": self.temperature,
+            "debug": self.debug,
+        }
+        base["resolved"] = {
+            "converter_script": self.resolved_converter_script,
+            "python_cmd": self.resolved_python_cmd,
+            "validate_bin": self.resolved_val_bin,
+        }
+        return base
 
-        # Planning loop options
-        self.max_steps = 30
-        self.plan_timeout = 300  # seconds, if you support timeouts
+    # ---------- Internal Helpers ----------
 
-        # Debug flag for verbose output/logging
-        self.debug = True
+    def _ensure_dirs(self) -> None:
+        """Create centralized_root and results_root if absent."""
+        for d in [self.centralized_root, self.results_root]:
+            path = Path(d)
+            if not path.exists():
+                path.mkdir(parents=True, exist_ok=True)
+                if self.debug:
+                    print(f"[CONFIG] Created directory: {path}")
 
-        # Default temperature value
-        self.temperature = 0.7
-
-        # Add more options as needed for batch jobs, logging, etc.
-
-    def as_dict(self):
+    def _resolve_converter_script(self) -> None:
         """
-        Returns all config fields as a dictionary for easy serialization/logging.
+        Attempt to resolve the converter script path.
+        - If path exists, use it.
+        - If missing and contains the common typo 'centalized', attempt alternate 'centralized'.
+        - Else scan under /home/rr/ma-planning for 'ma-to-pddl.py'.
         """
-        return self.__dict__
+        raw = self.converter["converter_script"]
+        candidate = Path(raw)
+
+        if candidate.is_file():
+            self.resolved_converter_script = str(candidate)
+            return
+
+        # Attempt to fix the 'centalized' vs 'centralized' typo.
+        if "centalized" in raw:
+            alt = raw.replace("centalized", "centralized")
+            if Path(alt).is_file():
+                if self.debug:
+                    print(f"[CONFIG] Auto-corrected converter_script path: {alt}")
+                self.converter["converter_script"] = alt
+                self.resolved_converter_script = alt
+                return
+
+        # Fallback search.
+        search_root = Path("/home/rr/ma-planning")
+        matches = list(search_root.rglob("ma-to-pddl.py"))
+        if matches:
+            picked = matches[0]
+            if self.debug:
+                print(f"[CONFIG] Auto-detected converter script: {picked}")
+            self.converter["converter_script"] = str(picked)
+            self.resolved_converter_script = str(picked)
+            return
+
+        raise FileNotFoundError(
+            f"[CONFIG ERROR] Converter script not found: {raw}\n"
+            "Tried typo correction and fallback search.\n"
+            "Set MAP_PLANNING_CONVERTER_SCRIPT or update Config.converter['converter_script']."
+        )
+
+    def _resolve_executable(
+        self, spec: str, required: bool, label: str
+    ) -> Optional[str]:
+        """
+        Resolve an executable:
+          - If spec contains a path separator or is absolute, check existence & executable bit.
+          - Else use shutil.which().
+        """
+        if os.path.isabs(spec) or os.path.sep in spec:
+            if os.access(spec, os.X_OK):
+                return spec
+            if required:
+                raise RuntimeError(
+                    f"[CONFIG ERROR] {label} not executable or not found: {spec}"
+                )
+            return None
+
+        found = shutil.which(spec)
+        if found:
+            return found
+        if required:
+            raise RuntimeError(f"[CONFIG ERROR] {label} '{spec}' not found in PATH.")
+        return None
+
+
+# ---------- Optional: quick inline test ----------
+
+if __name__ == "__main__":
+    cfg = Config()
+    try:
+        cfg.resolve()
+    except Exception as e:
+        print(f"FAILED TO RESOLVE CONFIG: {e}")
+    else:
+        import pprint
+
+        pprint.pprint(cfg.as_dict())

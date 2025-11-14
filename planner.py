@@ -31,7 +31,7 @@ class MAPLLMPipeline:
         centralized_domain, centralized_problem = self.converter.convert(
             domain_dir, domain_file, problem_file
         )
-        print("[INFO] Centralized files:", centralized_domain, centralized_problem)
+        # print("[INFO] Centralized files:", centralized_domain, centralized_problem)
 
         # Choose strategy and generate plan
         strategy = self._select_strategy(mode)
