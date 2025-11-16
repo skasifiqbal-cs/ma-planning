@@ -1,74 +1,108 @@
-import logging
-import os
 from pathlib import Path
+from typing import Tuple, List
+
 from centralize_ma import MAPDDLConverter
 from llm_prompt import LLMPrompt
-from validation import Validator
-
-from strategies import (
-    PlanGenerationStrategy,
-    OpenLoopNoValidationStrategy,
-    SoftValidationAutoregressiveStrategy,
-)
+from strategies import OpenLoopNoValidationStrategy
 
 
 class MAPLLMPipeline:
+    """
+    Pipeline that:
+      1) Reads unfactored MA-PDDL domain/problem for prompting the LLM.
+      2) Converts to centralized PDDL for grounding/validation.
+      3) Prompts the LLM to produce a sequential plan with agent as first arg.
+      4) Saves plan to results/<domain>/<problem>.plan
+    """
+
     def __init__(self, config):
         self.config = config
+        # Converter for centralized PDDL (used for grounding + validation)
         self.converter = MAPDDLConverter(
-            config.converter["converter_script"],
-            config.converter["python_cmd"],
-            config.centralized_root,
+            converter_script=config.converter["converter_script"],
+            python_cmd=config.converter["python_cmd"],
+            centralized_root=config.centralized_root,
         )
-        self.prompt = LLMPrompt(config)
-        self.validator = Validator(config.val_bin)
+        # LLM client and strategy
+        self.llm = LLMPrompt(
+            model=config.llm_model,
+            url=config.llm_url,
+            temperature=config.temperature,
+            debug=config.debug,
+        )
+        self.strategy = OpenLoopNoValidationStrategy(
+            llm=self.llm,
+            debug=config.debug,
+            show_prompt=getattr(config, "debug_print_prompt", False),
+            show_response=getattr(config, "debug_print_response", True),
+        )
 
-    def run(self, domain_dir, domain_file, problem_file, mode="no-val", max_steps=None):
-        if not max_steps:
-            max_steps = self.config.max_steps
+    def _resolve_input_file(self, base_dir: Path, base_name: str) -> Path:
+        """
+        Locate MA-PDDL input file given base name that may or may not have .pddl.
+        Tries '<base_name>' then '<base_name>.pddl'.
+        """
+        p = base_dir / base_name
+        if p.is_file():
+            return p
+        p2 = base_dir / f"{base_name}.pddl"
+        if p2.is_file():
+            return p2
+        raise FileNotFoundError(f"Input file not found: {p} or {p2}")
 
-        # Centralize the PDDL domain/problem files
+    def run(
+        self,
+        domain_dir: str,
+        domain_file: str,
+        problem_file: str,
+        mode: str = "no-val",
+        max_steps: int = 0,
+    ) -> Tuple[List[str], Path, Path, Path]:
+        """
+        Returns:
+          plan (list of actions),
+          plan_path,
+          centralized_domain_path,
+          centralized_problem_path
+        """
+        base_dir = Path(domain_dir)
+        domain_name = base_dir.name
+
+        # 1) MA-PDDL input files (for the prompt)
+        ma_domain_path = self._resolve_input_file(base_dir, domain_file)
+        ma_problem_path = self._resolve_input_file(base_dir, problem_file)
+
+        # 2) Centralize (for grounding + validation)
         centralized_domain, centralized_problem = self.converter.convert(
             domain_dir, domain_file, problem_file
         )
-        # print("[INFO] Centralized files:", centralized_domain, centralized_problem)
+        centralized_domain_path = Path(centralized_domain)
+        centralized_problem_path = Path(centralized_problem)
 
-        # Choose strategy and generate plan
-        strategy = self._select_strategy(mode)
-        plan = strategy.generate_plan(
-            centralized_domain, centralized_problem, max_steps
+        # 3) Generate plan using MA-PDDL prompt, but ground against centralized PDDL
+        plan = self.strategy.generate_plan(
+            ma_domain_file=str(ma_domain_path),
+            ma_problem_file=str(ma_problem_path),
+            ground_domain_file=str(centralized_domain_path),
+            ground_problem_file=str(centralized_problem_path),
+            max_steps=max_steps or self.config.max_steps,
         )
 
-        # Print plan
-        print("\n[RESULT] Final generated plan:")
-        for i, action in enumerate(plan):
-            print(f"{i}: {action}")
+        # 4) Save plan
+        results_dir = Path(self.config.results_root) / domain_name
+        results_dir.mkdir(parents=True, exist_ok=True)
+        prob_stem = (
+            Path(problem_file).stem if Path(problem_file).suffix else problem_file
+        )
+        plan_path = results_dir / f"{prob_stem}.plan"
+        with plan_path.open("w", encoding="utf-8") as f:
+            for a in plan:
+                f.write(a.strip() + "\n")
 
-        # Save plan
-        out_path = self._save_plan(domain_dir, problem_file, plan)
-        print(f"[INFO] Plan saved to: {out_path}")
+        if self.config.debug:
+            print("[RESULT] Final generated plan:")
+            for i, a in enumerate(plan[:50]):
+                print(f"{i}: {a}")
+            print(f"[INFO] Plan saved to: {plan_path}")
 
-        # Return for callers (e.g., main.py batch/validate)
-        return plan, out_path, centralized_domain, centralized_problem
-
-    def _select_strategy(self, mode: str) -> PlanGenerationStrategy:
-        debug = getattr(self.config, "debug", False)
-        if mode == "no-val":
-            return OpenLoopNoValidationStrategy(self.prompt, debug=debug)
-        if mode == "soft-val-ar":
-            return SoftValidationAutoregressiveStrategy(self.prompt, debug=debug)
-        raise NotImplementedError(f"Unknown mode: {mode}")
-
-    def _save_plan(
-        self, domain_dir: str, problem_file_arg: str, plan: list[str]
-    ) -> Path:
-        domain_dir_name = Path(domain_dir).name
-        out_dir = Path("results") / domain_dir_name
-        out_dir.mkdir(parents=True, exist_ok=True)
-        problem_stem = Path(problem_file_arg).stem
-        out_path = out_dir / f"{problem_stem}.plan"
-        content = "\n".join(plan)
-        if content and not content.endswith("\n"):
-            content += "\n"
-        out_path.write_text(content)
-        return out_path
+        return plan, plan_path, centralized_domain_path, centralized_problem_path

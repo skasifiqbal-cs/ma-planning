@@ -1,4 +1,4 @@
-from typing import List, Optional, Protocol
+from typing import List, Protocol, Set
 from pathlib import Path
 
 from ground_actions import ActionGrounder
@@ -8,96 +8,92 @@ from llm_prompt import LLMPrompt
 
 class PlanGenerationStrategy(Protocol):
     def generate_plan(
-        self, domain_file: str, problem_file: str, max_steps: int
+        self,
+        ma_domain_file: str,
+        ma_problem_file: str,
+        ground_domain_file: str,
+        ground_problem_file: str,
+        max_steps: int,
     ) -> List[str]: ...
 
 
 class OpenLoopNoValidationStrategy:
     """
-    True llm4pddl-style No Validation (open-loop):
-    - Build a single prompt (DOMAIN + PROBLEM + instruction).
-    - Ask the LLM for the entire plan in one response.
-    - Parse the response to extract actions and skip invalid ones (no retries, no applicability checks).
-    - Truncate to max_steps if provided.
+    Open-loop plan generation for MA-PDDL:
+      - Prompt uses unfactored MA-PDDL domain/problem.
+      - Grounding/Filtering uses centralized PDDL (pyperplan).
+      - Output is a sequential list of grounded actions, one per line.
+      - Each action must be: (operator agent ...other arguments...)
     """
 
-    def __init__(self, llm: LLMPrompt, debug: bool = False):
+    def __init__(
+        self,
+        llm: LLMPrompt,
+        debug: bool = False,
+        show_prompt: bool = False,
+        show_response: bool = True,
+    ):
         self._llm = llm
         self._debug = debug
+        self._show_prompt = show_prompt
+        self._show_response = show_response
 
     def generate_plan(
-        self, domain_file: str, problem_file: str, max_steps: int
+        self,
+        ma_domain_file: str,
+        ma_problem_file: str,
+        ground_domain_file: str,
+        ground_problem_file: str,
+        max_steps: int,
     ) -> List[str]:
-        domain_txt = Path(domain_file).read_text()
-        problem_txt = Path(problem_file).read_text()
+        # Load MA-PDDL text for the prompt
+        domain_txt = Path(ma_domain_file).read_text(encoding="utf-8")
+        problem_txt = Path(ma_problem_file).read_text(encoding="utf-8")
 
-        # Ground once to get the full set of grounded operator names (for name/type filtering only).
-        grounder = ActionGrounder(domain_file, problem_file)
+        # Ground operator names from centralized PDDL
+        grounder = ActionGrounder(ground_domain_file, ground_problem_file)
         task = grounder.task
-        ground_ops = {op.name for op in task.operators}
+        op_names: Set[str] = {op.name for op in task.operators}
 
-        prompt = self._build_full_plan_prompt(domain_txt, problem_txt)
-        if self._debug:
-            print("\n===== LLM OPEN-LOOP PROMPT BEGIN =====")
+        # Build MA prompt
+        prompt = self._build_ma_prompt(domain_txt, problem_txt)
+
+        # IMPORTANT: print the FULL prompt in debug (restore earlier behavior)
+        if self._debug and self._show_prompt:
+            print("\n===== LLM PROMPT BEGIN =====")
             print(prompt)
-            print("===== LLM OPEN-LOOP PROMPT END =====\n")
+            print("===== LLM PROMPT END =====\n")
 
+        # LLM call
         response = self._llm.chat(prompt)
-        if response is None:
-            if self._debug:
-                print("[DEBUG] LLM returned empty response for open-loop plan.")
-            return []
 
-        if self._debug:
+        if self._debug and self._show_response:
             print("[DEBUG] Open-loop LLM raw response (full):")
-            print(response)
+            print(response or "")
 
-        # Parse the entire response and skip invalid actions by name/type (no applicability).
+        # Parse and keep actions whose operator name exists in the centralized ground set
         plan = parse_actions_no_validation(
-            response, valid_ground_ops=ground_ops, disable_name_checks=False
+            response or "", valid_ground_ops=op_names, disable_name_checks=False
         )
 
-        # Truncate to max_steps if needed.
+        # Truncate if needed
         if max_steps and len(plan) > max_steps:
             plan = plan[:max_steps]
-
-        if self._debug:
-            print("\n[DEBUG] Parsed plan actions (full):")
-            for i, a in enumerate(plan):
-                print(f"{i}: {a}")
-            print()
-
         return plan
 
-    def _build_full_plan_prompt(self, domain_txt: str, problem_txt: str) -> str:
+    def _build_ma_prompt(self, domain_txt: str, problem_txt: str) -> str:
         instr = (
-            "Return a COMPLETE plan as a sequence of grounded actions, one per line.\n"
-            "Action format: (operator arg1 arg2 ...)\n"
-            "Do NOT explain. Do NOT output anything else. Only the actions."
+            "You are an expert multi-agent planner working with MA-PDDL.\n"
+            "Output a valid sequential plan as grounded actions, one per line.\n"
+            "CRITICAL FORMAT: (operator agent ...other arguments...)\n"
+            "Use ONLY operator names defined in the DOMAIN below.\n"
+            "The agent argument must ALWAYS be the first after the operator.\n"
+            "Do NOT invent operators (e.g., move_to, collect_soil_sample); use the domain's exact names.\n"
+            "Output ONLY the actions, one per line. No explanations."
         )
         return (
             f"{instr}\n\n"
             f"DOMAIN:\n{domain_txt}\n\n"
             f"PROBLEM:\n{problem_txt}\n\n"
             f"PLAN:"
-        )
-
-
-class SoftValidationAutoregressiveStrategy:
-    """
-    Placeholder for a Soft Validation (autoregressive) strategy:
-    - One action at a time.
-    - On invalid action, replace with nearest applicable via embeddings (Sentence-BERT).
-    - Append action to the prompt and re-query.
-    """
-
-    def __init__(self, llm: LLMPrompt, debug: bool = False):
-        self._llm = llm
-        self._debug = debug
-
-    def generate_plan(
-        self, domain_file: str, problem_file: str, max_steps: int
-    ) -> List[str]:
-        raise NotImplementedError(
-            "SoftValidationAutoregressiveStrategy is not implemented yet."
         )

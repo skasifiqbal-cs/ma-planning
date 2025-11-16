@@ -1,87 +1,120 @@
-import requests
 import json
 from typing import Optional
-from config import Config
+import requests
 
 
 class LLMPrompt:
     """
-    Wrapper for an Ollama-compatible /api/chat endpoint.
-    - Forces non-streaming responses (stream: false).
-    - If config.debug is True, prints the payload (including the user prompt) before sending.
+    Simple LLM client for Ollama's /api/chat (default), with fallback to OpenAI-like responses.
+
+    Pass either:
+      - Base URL:  "http://localhost:11434"
+      - Full URL:  "http://localhost:11434/api/chat"
+
+    The class normalizes to a single /api/chat endpoint without duplication.
     """
 
-    def __init__(self, config: Config):
-        self.model = config.llm_model
-        self.url = config.llm_url
-        self.temperature = getattr(config, "temperature", 0.1)
-        self.max_tokens = getattr(config, "max_tokens", 128)
-        self.request_timeout = 300
-        self.debug = getattr(config, "debug", False)
+    def __init__(
+        self,
+        model: str,
+        url: str,
+        temperature: float = 0.7,
+        max_tokens: int = 128,
+        timeout: int = 120,
+        debug: bool = False,
+        system_prompt: Optional[
+            str
+        ] = "You are a PDDL planning assistant. Respond ONLY with plan actions. No explanations.",
+    ):
+        self.model = model
+        self.url = url.rstrip("/")
+        self.temperature = float(temperature)
+        self.max_tokens = int(max_tokens)
+        self.timeout = int(timeout)
+        self.debug = bool(debug)
+        self.system_prompt = system_prompt
+
+    def _chat_endpoint(self) -> str:
+        """
+        Normalize the endpoint to a single /api/chat path:
+          - "http://host:11434"           -> "http://host:11434/api/chat"
+          - "http://host:11434/api"       -> "http://host:11434/api/chat"
+          - "http://host:11434/api/chat"  -> "http://host:11434/api/chat"
+        """
+        u = self.url
+        if u.endswith("/api/chat"):
+            return u
+        if u.endswith("/api"):
+            return f"{u}/chat"
+        return f"{u}/api/chat"
 
     def chat(
-        self, user_content: str, system_content: Optional[str] = None
+        self, user_prompt: str, extra_system: Optional[str] = None
     ) -> Optional[str]:
-        if system_content is None:
-            system_content = "You are a PDDL planning assistant. Respond ONLY with one valid grounded action. No explanations."
+        sys_prompt = extra_system if extra_system is not None else self.system_prompt
 
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": user_content},
+                {"role": "system", "content": sys_prompt or ""},
+                {"role": "user", "content": user_prompt},
             ],
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
             "stream": False,
+            "options": {
+                "temperature": self.temperature,
+                "num_predict": self.max_tokens,
+            },
         }
 
+        endpoint = self._chat_endpoint()
         if self.debug:
-            print("\n[DEBUG] LLM REQUEST")
-            print(f"POST {self.url}")
+            print(f"POST {endpoint}")
             print(
                 f"model: {self.model}, temperature: {self.temperature}, max_tokens: {self.max_tokens}, stream: False"
             )
-            print("---- SYSTEM ----")
-            print(system_content)
-            print("---- USER PROMPT ----")
-            print(user_content)
-            print("---- END PROMPT ----\n")
 
+        # Primary attempt: normalized endpoint
         try:
-            resp = requests.post(self.url, json=payload, timeout=self.request_timeout)
+            resp = requests.post(endpoint, json=payload, timeout=self.timeout)
             resp.raise_for_status()
         except requests.RequestException as e:
-            print(f"[ERROR] LLM request failed: {e}")
-            return None
+            if self.debug:
+                print(f"[LLM ERROR] HTTP request failed: {e}")
+            # Fallback attempt: post to the raw URL as given
+            try:
+                resp = requests.post(self.url, json=payload, timeout=self.timeout)
+                resp.raise_for_status()
+            except requests.RequestException as e2:
+                if self.debug:
+                    print(f"[LLM ERROR] Fallback HTTP request failed: {e2}")
+                return None
 
-        # Prefer structured; if fails, return raw text
         try:
             data = resp.json()
-            content = None
-            if isinstance(data, dict):
-                msg = data.get("message")
-                if isinstance(msg, dict):
-                    content = msg.get("content")
-                if content is None:
-                    choices = data.get("choices")
-                    if isinstance(choices, list) and choices:
-                        content = (choices[0].get("message") or {}).get("content")
-            if not content:
-                content = resp.text
-            return (content or "").strip() or None
-        except json.JSONDecodeError:
-            return (resp.text or "").strip() or None
+        except Exception:
+            if self.debug:
+                print("[LLM ERROR] Failed to parse JSON response")
+                print((resp.text or "")[:500])
+            return None
 
-    @staticmethod
-    def extract_first_action(text: str) -> str | None:
-        # A simple heuristic: first balanced parenthesized expression
-        # If your actions always look like (op arg1 arg2 ...), this is sufficient.
-        s = (text or "").strip()
-        start = s.find("(")
-        end = s.find(")", start + 1)
-        if start != -1 and end != -1:
-            return s[start : end + 1].strip()
-        # Fallback to first line
-        line = s.splitlines()[0].strip() if s else ""
-        return line or None
+        # Ollama response
+        msg = data.get("message", {})
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            return content
+
+        # OpenAI-like fallback
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            cmsg = choices[0].get("message", {})
+            ccontent = cmsg.get("content")
+            if isinstance(ccontent, str):
+                return ccontent
+
+        if self.debug:
+            print("[LLM ERROR] Could not extract assistant content from response JSON")
+            try:
+                print(json.dumps(data, indent=2)[:1000])
+            except Exception:
+                print(str(data)[:1000])
+        return None
