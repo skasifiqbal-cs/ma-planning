@@ -5,5 +5,5 @@ __pycache__/
 results/
 logs/
 .vscode/
-centralized/
+**/centralized/
 eval/
