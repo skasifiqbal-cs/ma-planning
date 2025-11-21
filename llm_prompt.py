@@ -1,5 +1,5 @@
 import json
-from typing import Optional
+from typing import Optional, Union, List
 import requests
 
 
@@ -35,12 +35,6 @@ class LLMPrompt:
         self.system_prompt = system_prompt
 
     def _chat_endpoint(self) -> str:
-        """
-        Normalize the endpoint to a single /api/chat path:
-          - "http://host:11434"           -> "http://host:11434/api/chat"
-          - "http://host:11434/api"       -> "http://host:11434/api/chat"
-          - "http://host:11434/api/chat"  -> "http://host:11434/api/chat"
-        """
         u = self.url
         if u.endswith("/api/chat"):
             return u
@@ -49,9 +43,20 @@ class LLMPrompt:
         return f"{u}/api/chat"
 
     def chat(
-        self, user_prompt: str, extra_system: Optional[str] = None
+        self,
+        user_prompt: str,
+        extra_system: Optional[str] = None,
+        stop: Optional[Union[str, List[str]]] = None,  # NEW: stop tokens
     ) -> Optional[str]:
         sys_prompt = extra_system if extra_system is not None else self.system_prompt
+
+        options = {
+            "temperature": self.temperature,
+            "num_predict": self.max_tokens,
+        }
+        # Ollama supports "stop" as string or list of strings
+        if stop:
+            options["stop"] = [stop] if isinstance(stop, str) else stop
 
         payload = {
             "model": self.model,
@@ -60,10 +65,7 @@ class LLMPrompt:
                 {"role": "user", "content": user_prompt},
             ],
             "stream": False,
-            "options": {
-                "temperature": self.temperature,
-                "num_predict": self.max_tokens,
-            },
+            "options": options,
         }
 
         endpoint = self._chat_endpoint()
@@ -73,14 +75,12 @@ class LLMPrompt:
                 f"model: {self.model}, temperature: {self.temperature}, max_tokens: {self.max_tokens}, stream: False"
             )
 
-        # Primary attempt: normalized endpoint
         try:
             resp = requests.post(endpoint, json=payload, timeout=self.timeout)
             resp.raise_for_status()
         except requests.RequestException as e:
             if self.debug:
                 print(f"[LLM ERROR] HTTP request failed: {e}")
-            # Fallback attempt: post to the raw URL as given
             try:
                 resp = requests.post(self.url, json=payload, timeout=self.timeout)
                 resp.raise_for_status()
