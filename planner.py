@@ -6,7 +6,7 @@ from centralize_ma import MAPDDLConverter
 from llm_prompt import LLMPrompt
 from strategies import (
     OpenLoopNoValidationStrategy,
-    LLM4PDDLAutoregressiveStrategy,  # CHANGED: use llm4pddl-style strategy
+    LLM4PDDLZeroShotAutoregressiveStrategy,
 )
 from evaluation import PlanEvaluator
 
@@ -61,7 +61,7 @@ class MAPLLMPipeline:
 
         effective_max = max_steps or self.config.max_steps
         if mode == "soft-val-ar":
-            strategy = LLM4PDDLAutoregressiveStrategy(
+            strategy = LLM4PDDLZeroShotAutoregressiveStrategy(
                 llm=self.llm,
                 config=self.config,
                 embed_model=getattr(
@@ -69,9 +69,13 @@ class MAPLLMPipeline:
                 ),
             )
         else:
-            strategy = OpenLoopNoValidationStrategy(llm=self.llm, config=self.config)
+            strategy = OpenLoopNoValidationStrategy(
+                llm=self.llm,
+                config=self.config,
+            )
 
-        plan = strategy.generate_plan(
+        # Strategy now returns CANONICAL (inverted) plan
+        canonical_plan = strategy.generate_plan(
             ma_domain_file=str(ma_domain_path),
             ma_problem_file=str(ma_problem_path),
             ground_domain_file=str(centralized_domain_path),
@@ -86,26 +90,31 @@ class MAPLLMPipeline:
         )
         plan_path = results_dir / f"{prob_stem}.plan"
         with plan_path.open("w", encoding="utf-8") as f:
-            for a in plan:
-                f.write(a.strip() + "\n")
+            for a in canonical_plan:
+                f.write(a + "\n")
 
         if self.config.debug:
-            print("[RESULT] Final generated plan:")
-            for i, a in enumerate(plan[:50]):
+            print("[RESULT] Final canonical plan (inverted randomization):")
+            for i, a in enumerate(canonical_plan[:100]):
                 print(f"{i}: {a}")
             print(f"[INFO] Plan saved to: {plan_path}")
 
         if validate_after:
             evaluator = PlanEvaluator(
-                val_bin=self.config.val_bin,
-                print_on_fail=print_eval_fail,
-                print_on_pass=print_eval_pass,
-                debug=self.config.debug,
+                validate_bin=self.config.val_bin,
+                timeout=120,
             )
-            _ = evaluator.evaluate(
+            ok = evaluator.evaluate(
                 str(centralized_domain_path),
                 str(centralized_problem_path),
                 str(plan_path),
             )
+            if self.config.debug:
+                print(f"[VALIDATE] {plan_path.name}: {'PASSED' if ok else 'FAILED'}")
 
-        return plan, plan_path, centralized_domain_path, centralized_problem_path
+        return (
+            canonical_plan,
+            plan_path,
+            centralized_domain_path,
+            centralized_problem_path,
+        )

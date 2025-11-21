@@ -27,6 +27,9 @@ Environment Variables:
   MAP_PLANNING_DEBUG        (use "0"/"1")
   MAP_PLANNING_DEBUG_PRINT_PROMPT     # "0"/"1", default "0"
   MAP_PLANNING_DEBUG_PRINT_RESPONSE   # "0"/"1", default "1"
+  MAP_PLANNING_RANDOMIZE_OBJECT_NAMES   ("0"/"1", default "0")
+  MAP_PLANNING_RANDOMIZE_OPERATOR_NAMES ("0"/"1", default "0")
+  MAP_PLANNING_RANDOM_SEED              (int, default "0")
 
 Typical usage:
     from config import Config

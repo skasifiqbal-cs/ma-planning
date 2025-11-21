@@ -1,5 +1,8 @@
+import random
+from random import Random
 from typing import List, Protocol, Set, Dict
 from pathlib import Path
+import os
 import re
 import difflib
 
@@ -55,39 +58,89 @@ def _single_wrap(a: str) -> str:
 
 
 def _extract_first_action(raw: str) -> str:
-    """Extract first parenthesized chunk or fallback tokens until ')'. Returns single-wrapped."""
     raw = raw.strip()
     m = re.search(r"\([^\(\)]+\)", raw)
     if m:
         return _single_wrap(m.group(0))
-    # Fallback
     line = raw.splitlines()[0] if raw else ""
     if ")" in line:
         prefix = line.split(")", 1)[0]
     else:
         prefix = line
-    toks = prefix.split()
+    toks = prefix.strip().split()
     if not toks:
         return ""
     return _single_wrap("(" + " ".join(toks) + ")")
 
 
+def _single_wrap(a: str) -> str:
+    inner = a.strip()
+    while inner.startswith("(") and inner.endswith(")"):
+        tmp = inner[1:-1].strip()
+        if not tmp:
+            break
+        inner = tmp
+    inner = re.sub(r"\s+", " ", inner)
+    return f"({inner})" if inner else ""
+
+
 def _canonical(a: str) -> str:
-    """Return canonical action string with no outer parens."""
-    return _unwrap_all(a)
+    s = a.strip()
+    if s.startswith("(") and s.endswith(")"):
+        s = s[1:-1].strip()
+    return re.sub(r"\s+", " ", s)
 
 
 def _similarity_best(query: str, pool: List[str], embedder=None) -> str:
     if not pool:
         return ""
     if embedder is not None:
-        q = embedder.encode([query], convert_to_tensor=True)[0]
-        embs = embedder.encode(pool, convert_to_tensor=True, show_progress_bar=False)
-        sims = st_util.cos_sim(q, embs)[0].cpu().tolist()
+        qvec = embedder.encode([query], convert_to_tensor=True)[0]
+        pvecs = embedder.encode(pool, convert_to_tensor=True, show_progress_bar=False)
+        sims = st_util.cos_sim(qvec, pvecs)[0].cpu().tolist()
         return pool[max(range(len(pool)), key=lambda i: sims[i])]
-    scored = [(difflib.SequenceMatcher(None, query, p).ratio(), p) for p in pool]
+    scored = [
+        (difflib.SequenceMatcher(None, query, cand).ratio(), cand) for cand in pool
+    ]
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored[0][1]
+
+
+def _random_aliases(names: List[str], rng: Random) -> Dict[str, str]:
+    subs: Dict[str, str] = {}
+    charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+    for name in sorted(names):
+        token = rng.choice("abcdefghijklmnopqrstuvwxyz")
+        token += "".join(rng.choice(charset) for _ in range(5))
+        subs[name] = token
+    return subs
+
+
+def _apply_subs(text: str, subs: Dict[str, str]) -> str:
+    if not subs:
+        return text
+    pattern = re.compile(
+        r"\b("
+        + "|".join(re.escape(k) for k in sorted(subs, key=len, reverse=True))
+        + r")\b"
+    )
+    return pattern.sub(lambda m: subs[m.group(0)], text)
+
+
+def _invert_action(
+    action_paren: str, op_subs: Dict[str, str], obj_subs: Dict[str, str]
+) -> str:
+    canon = _canonical(action_paren)
+    toks = canon.split()
+    if not toks:
+        return canon
+    op, args = toks[0], toks[1:]
+    rev_op = {v: k for k, v in op_subs.items()}
+    rev_obj = {v: k for k, v in obj_subs.items()}
+    if op in rev_op:
+        op = rev_op[op]
+    args = [rev_obj.get(a, a) for a in args]
+    return " ".join([op] + args)
 
 
 class PlanGenerationStrategy(Protocol):
@@ -167,14 +220,15 @@ class OpenLoopNoValidationStrategy:
         )
 
 
-class LLM4PDDLAutoregressiveStrategy:
+# ---------- Zero-Shot llm4pddl-style Autoregressive with Randomization ----------
+
+
+class LLM4PDDLZeroShotAutoregressiveStrategy:
     """
-    Reproduces llm4pddl autoregressive core:
-      - Single growing prompt.
-      - One action per iteration (stop token ')').
-      - Canonical operator names (no outer parentheses) for applicability lookup.
-      - Similarity repair only when proposed action inapplicable or unknown.
-      - Wrap actions exactly once when storing.
+    Zero-shot llm4pddl-style autoregressive with optional randomization:
+      - Randomization shown only to LLM.
+      - Canonical plan is stored & returned.
+      - Full prompt printed each step.
     """
 
     def __init__(
@@ -194,6 +248,61 @@ class LLM4PDDLAutoregressiveStrategy:
                     print("[AR] Embedder load failed; using difflib:", e)
                 self._use_embed = False
 
+        self._rand_ops_flag = os.getenv(
+            "MAP_PLANNING_RANDOMIZE_OPERATOR_NAMES", "0"
+        ).lower() in {"1", "true", "yes", "on"}
+        self._rand_objs_flag = os.getenv(
+            "MAP_PLANNING_RANDOMIZE_OBJECT_NAMES", "0"
+        ).lower() in {"1", "true", "yes", "on"}
+        seed_env = os.getenv("MAP_PLANNING_RANDOM_SEED", "0")
+        try:
+            self._rand_seed = int(seed_env)
+        except ValueError:
+            self._rand_seed = 0
+        self._rng = Random(self._rand_seed)
+
+        self._op_subs: Dict[str, str] = {}
+        self._obj_subs: Dict[str, str] = {}
+
+    def _build_initial_prompt(self, domain_txt: str, problem_txt: str) -> str:
+        return (
+            "Q:\n"
+            "DOMAIN:\n"
+            f"{domain_txt}\n\n"
+            "PROBLEM:\n"
+            f"{problem_txt}\n\n"
+            "A:\n"
+        )
+
+    def _create_randomizations(self, ground_ops: Dict[str, object]):
+        if self._rand_ops_flag:
+            op_names = sorted({op.split()[0] for op in ground_ops.keys()})
+            self._op_subs = _random_aliases(op_names, self._rng)
+        else:
+            self._op_subs = {}
+        if self._rand_objs_flag:
+            obj_names = set()
+            for canon in ground_ops.keys():
+                toks = canon.split()
+                for t in toks[1:]:
+                    obj_names.add(t)
+            self._obj_subs = _random_aliases(sorted(obj_names), self._rng)
+        else:
+            self._obj_subs = {}
+
+    def _randomize_action_for_prompt(self, canonical_action: str) -> str:
+        toks = canonical_action.split()
+        if not toks:
+            return canonical_action
+        op = toks[0]
+        args = toks[1:]
+        op_out = self._op_subs.get(op, op)
+        args_out = [self._obj_subs.get(a, a) for a in args]
+        return _single_wrap(f"{op_out} " + " ".join(args_out))
+
+    def _invert_llm_action(self, llm_action_paren: str) -> str:
+        return _invert_action(llm_action_paren, self._op_subs, self._obj_subs)
+
     def generate_plan(
         self,
         ma_domain_file: str,
@@ -205,33 +314,35 @@ class LLM4PDDLAutoregressiveStrategy:
         domain_txt = Path(ma_domain_file).read_text(encoding="utf-8")
         problem_txt = Path(ma_problem_file).read_text(encoding="utf-8")
 
-        # Ground centralized domain
         grounder = ActionGrounder(ground_domain_file, ground_problem_file)
         task = grounder.task
 
-        # Canonical mapping: "navigate rover0 wp4 wp6" -> operator
         ground_ops: Dict[str, object] = {op.name.strip(): op for op in task.operators}
 
-        def applicable(canon: str, facts) -> bool:
-            return canon in ground_ops and ground_ops[canon].applicable(facts)
+        def applicable(c: str, facts) -> bool:
+            return c in ground_ops and ground_ops[c].applicable(facts)
 
-        prompt = (
-            "You are a MA-PDDL planning assistant.\n"
-            "Return ONE grounded action, end at ')'. No explanations.\n\n"
-            f"DOMAIN:\n{domain_txt}\n\nPROBLEM:\n{problem_txt}\n\nPLAN:\n"
+        self._create_randomizations(ground_ops)
+        domain_txt_rand = _apply_subs(
+            _apply_subs(domain_txt, self._op_subs), self._obj_subs
+        )
+        problem_txt_rand = _apply_subs(
+            _apply_subs(problem_txt, self._op_subs), self._obj_subs
         )
 
-        plan: List[str] = []
+        prompt = self._build_initial_prompt(domain_txt_rand, problem_txt_rand)
+
+        plan_display: List[str] = []  # randomized (shown to LLM)
+        plan_canonical: List[str] = []  # original (returned/saved)
         current_facts = task.initial_state
 
         for step in range(1, (max_steps or 999999) + 1):
             if self._cfg.debug and self._cfg.debug_print_prompt:
-                print(f"\n===== STEP {step} PROMPT (TAIL) =====")
-                tail = prompt.split("PLAN:", 1)[-1]
-                print("...PLAN:" + tail[-1000:])
-                print("=====================================\n")
+                print(f"\n===== STEP {step} FULL PROMPT =====")
+                print(prompt)
+                print("===== END STEP PROMPT =====\n")
 
-            sys = "Output ONE grounded action and stop at the first ')'."
+            sys = "Return ONE grounded PDDL plan action (using shown names) and stop at ')'. No commentary."
             raw = self._llm.chat(prompt, extra_system=sys, stop=")") or ""
             if not raw.strip().endswith(")"):
                 raw = raw.strip() + ")"
@@ -239,52 +350,48 @@ class LLM4PDDLAutoregressiveStrategy:
             if self._cfg.debug and self._cfg.debug_print_response:
                 print(f"[DEBUG] Raw step {step}:\n{raw}")
 
-            # Extract first action
-            action_paren = _extract_first_action(raw)
-            if not action_paren:
+            act_rand = _extract_first_action(raw)
+            if not act_rand:
                 if self._cfg.debug:
-                    print("[AR] Could not extract an action; stopping.")
+                    print("[AR] No action parsed; stopping.")
                 break
 
-            canon = _canonical(action_paren)
+            canon = _canonical(self._invert_llm_action(act_rand))
 
             if applicable(canon, current_facts):
                 accepted_canon = canon
-                repair_reason = None
+                repaired = False
             else:
-                # Build list of current applicable canonical actions
-                current_applicable = [
+                candidates = [
                     a for a, op in ground_ops.items() if op.applicable(current_facts)
                 ]
-                if not current_applicable:
+                if not candidates:
                     if self._cfg.debug:
-                        print("[AR] Dead end (no applicable actions). Stopping.")
+                        print("[AR] No applicable actions; stopping.")
                     break
                 accepted_canon = _similarity_best(
-                    canon,
-                    current_applicable,
-                    self._embedder if self._use_embed else None,
+                    canon, candidates, self._embedder if self._use_embed else None
                 )
-                repair_reason = "inapplicable-or-unknown"
+                repaired = True
 
-            # Skip consecutive exact duplicate
-            if plan and _canonical(plan[-1]) == accepted_canon:
+            if plan_canonical and plan_canonical[-1] == accepted_canon:
                 if self._cfg.debug:
-                    print("[AR] Skipping exact duplicate.")
+                    print("[AR] Skipping duplicate.")
                 continue
 
-            # Apply
             op_obj = ground_ops[accepted_canon]
             current_facts = op_obj.apply(current_facts)
 
-            final_action = _single_wrap(accepted_canon)
-            plan.append(final_action)
-            prompt += "\n" + final_action
+            plan_canonical.append(accepted_canon)
+            randomized_action = self._randomize_action_for_prompt(accepted_canon)
+            plan_display.append(randomized_action)
+            prompt += randomized_action + "\n"
 
-            if self._cfg.debug and repair_reason:
-                print(f"[AR] Repaired '{canon}' -> '{final_action}' ({repair_reason})")
+            if self._cfg.debug and repaired:
+                print(
+                    f"[AR] Repaired '{canon}' -> '{accepted_canon}' (shown as {randomized_action})"
+                )
 
-            # Goal check (pyperplan stores goal as set/list of facts)
             try:
                 if all(g in current_facts for g in task.goal):
                     if self._cfg.debug:
@@ -293,7 +400,8 @@ class LLM4PDDLAutoregressiveStrategy:
             except Exception:
                 pass
 
-            if max_steps and len(plan) >= max_steps:
+            if max_steps and len(plan_canonical) >= max_steps:
                 break
 
-        return plan
+        # Return canonical actions, single-wrapped, suitable for saving & validation
+        return [_single_wrap(a) for a in plan_canonical]
