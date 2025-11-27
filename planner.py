@@ -7,6 +7,8 @@ from llm_prompt import LLMPrompt
 from strategies import (
     OpenLoopNoValidationStrategy,
     LLM4PDDLZeroShotAutoregressiveStrategy,
+    OpenLoopSimilarityRepairStrategy,
+    OpenLoopRandomizedStrategy,
 )
 from evaluation import PlanEvaluator
 
@@ -68,6 +70,26 @@ class MAPLLMPipeline:
                     self.config, "embed_model", "paraphrase-MiniLM-L6-v2"
                 ),
             )
+
+        elif mode == "open-loop-repair":
+            strategy = OpenLoopSimilarityRepairStrategy(
+                llm=self.llm,
+                config=self.config,
+                embed_model=getattr(
+                    self.config, "embed_model", "paraphrase-MiniLM-L6-v2"
+                ),
+                # prevent_backtrack=True,  # toggle if desired
+            )
+
+        elif mode == "open-loop-rand":
+            strategy = OpenLoopRandomizedStrategy(
+                llm=self.llm,
+                config=self.config,
+                embed_model=getattr(
+                    self.config, "embed_model", "paraphrase-MiniLM-L6-v2"
+                ),
+            )
+
         else:
             strategy = OpenLoopNoValidationStrategy(
                 llm=self.llm,

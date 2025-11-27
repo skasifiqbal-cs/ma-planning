@@ -220,15 +220,172 @@ class OpenLoopNoValidationStrategy:
         )
 
 
+class OpenLoopRandomizedStrategy:
+    """
+    Single-shot zero-shot open-loop planning with optional randomization.
+
+    Steps:
+      1. Randomize domain/problem text (prompt only).
+      2. Single LLM call to produce multi-line plan.
+      3. Parse each '(...)' action.
+      4. Invert randomization to canonical names.
+      5. If operator is grounded AND applicable in current state -> accept & apply.
+         Otherwise skip.
+      6. Early stop if goal satisfied.
+      7. Return canonical single-wrapped actions.
+
+    Environment variables:
+      MAP_PLANNING_RANDOMIZE_OPERATOR_NAMES=1|0
+      MAP_PLANNING_RANDOMIZE_OBJECT_NAMES=1|0
+      MAP_PLANNING_RANDOM_SEED=<int>
+
+    No similarity repair, no backtrack suppression.
+    """
+
+    def __init__(
+        self, llm: LLMPrompt, config, embed_model: str = "paraphrase-MiniLM-L6-v2"
+    ):
+        self._llm = llm
+        self._cfg = config
+
+        # Randomization flags
+        self._rand_ops_flag = os.getenv(
+            "MAP_PLANNING_RANDOMIZE_OPERATOR_NAMES", "0"
+        ).lower() in {"1", "true", "yes", "on"}
+        self._rand_objs_flag = os.getenv(
+            "MAP_PLANNING_RANDOMIZE_OBJECT_NAMES", "0"
+        ).lower() in {"1", "true", "yes", "on"}
+        seed_env = os.getenv("MAP_PLANNING_RANDOM_SEED", "0")
+        try:
+            self._rand_seed = int(seed_env)
+        except ValueError:
+            self._rand_seed = 0
+        self._rng = Random(self._rand_seed)
+
+        # Subs
+        self._op_subs: Dict[str, str] = {}
+        self._obj_subs: Dict[str, str] = {}
+
+    def _create_randomizations(self, ground_ops: Dict[str, object]):
+        if self._rand_ops_flag:
+            ops = sorted({c.split()[0] for c in ground_ops.keys()})
+            self._op_subs = _random_aliases(ops, self._rng)
+        else:
+            self._op_subs = {}
+        if self._rand_objs_flag:
+            objs = set()
+            for canon in ground_ops.keys():
+                for t in canon.split()[1:]:
+                    objs.add(t)
+            self._obj_subs = _random_aliases(sorted(objs), self._rng)
+        else:
+            self._obj_subs = {}
+
+    def _randomize_text(self, text: str) -> str:
+        return _apply_subs(_apply_subs(text, self._op_subs), self._obj_subs)
+
+    def _invert_llm_action(self, act_paren: str) -> str:
+        return _invert_action(act_paren, self._op_subs, self._obj_subs)
+
+    def generate_plan(
+        self,
+        ma_domain_file: str,
+        ma_problem_file: str,
+        ground_domain_file: str,
+        ground_problem_file: str,
+        max_steps: int,
+    ) -> List[str]:
+
+        # Read original domain/problem
+        domain_txt = Path(ma_domain_file).read_text(encoding="utf-8")
+        problem_txt = Path(ma_problem_file).read_text(encoding="utf-8")
+
+        # Ground domain/problem (centralized or original fallback)
+        grounder = ActionGrounder(ground_domain_file, ground_problem_file)
+        task = grounder.task
+        ground_ops: Dict[str, object] = {op.name.strip(): op for op in task.operators}
+
+        def applicable(c: str, facts) -> bool:
+            return c in ground_ops and ground_ops[c].applicable(facts)
+
+        # Build randomization maps
+        self._create_randomizations(ground_ops)
+
+        # Prompt
+        prompt = (
+            "You are a zero-shot PDDL planner. Produce a valid sequential plan.\n"
+            "Format: one grounded action per line: (operator arg1 arg2 ...).\n"
+            "No explanations.\n\n"
+            f"DOMAIN:\n{self._randomize_text(domain_txt)}\n\n"
+            f"PROBLEM:\n{self._randomize_text(problem_txt)}\n\n"
+            "PLAN:\n"
+        )
+
+        if self._cfg.debug and getattr(self._cfg, "debug_print_prompt", True):
+            print("\n===== OPEN-LOOP RANDOMIZED PROMPT =====")
+            print(prompt)
+            print("===== END PROMPT =====\n")
+
+        raw = self._llm.chat(prompt) or ""
+        if self._cfg.debug and getattr(self._cfg, "debug_print_response", True):
+            print("[DEBUG] Raw open-loop response:\n" + raw)
+
+        # Collect all parenthesized segments
+        raw_actions = re.findall(r"\([^\(\)]+\)", raw)
+        if self._cfg.debug:
+            print(f"[OL-RAND] Extracted {len(raw_actions)} raw action strings.")
+
+        current_facts = task.initial_state
+        plan: List[str] = []
+        steps = 0
+
+        for act in raw_actions:
+            if max_steps and steps >= max_steps:
+                break
+            steps += 1
+
+            canon = _canonical(self._invert_llm_action(act))
+            if not canon:
+                continue
+
+            if not applicable(canon, current_facts):
+                # Skip invalid/inapplicable
+                if self._cfg.debug:
+                    print(f"[OL-RAND] Skipped (inapplicable/unknown): {canon}")
+                continue
+
+            # Apply
+            op_obj = ground_ops[canon]
+            current_facts = op_obj.apply(current_facts)
+            plan.append(_single_wrap(canon))
+
+            if self._cfg.debug:
+                print(f"[OL-RAND] Step {steps}: accepted -> {plan[-1]}")
+
+            # Early goal stop
+            try:
+                if all(g in current_facts for g in task.goal):
+                    if self._cfg.debug:
+                        print("[OL-RAND] Goal satisfied; truncating remainder.")
+                    break
+            except Exception:
+                pass
+
+        return plan
+
+
 # ---------- Zero-Shot llm4pddl-style Autoregressive with Randomization ----------
 
 
 class LLM4PDDLZeroShotAutoregressiveStrategy:
     """
-    Zero-shot llm4pddl-style autoregressive with optional randomization:
-      - Randomization shown only to LLM.
-      - Canonical plan is stored & returned.
-      - Full prompt printed each step.
+    Zero-shot llm4pddl-style autoregressive:
+      - Optional randomization (operator/object tokens to the LLM).
+      - One action per step (stop at ')').
+      - Similarity repair only when proposed action is unknown or inapplicable.
+      - Early stop on goal satisfaction.
+      - NO progress-op preference, NO backtrack suppression, NO few-shot.
+      - Returns canonical actions.
     """
 
     def __init__(
@@ -245,7 +402,7 @@ class LLM4PDDLZeroShotAutoregressiveStrategy:
                     print(f"[AR] Loaded embedding model: {embed_model}")
             except Exception as e:
                 if self._cfg.debug:
-                    print("[AR] Embedder load failed; using difflib:", e)
+                    print("[AR] Embedder load failed; difflib fallback:", e)
                 self._use_embed = False
 
         self._rand_ops_flag = os.getenv(
@@ -267,38 +424,36 @@ class LLM4PDDLZeroShotAutoregressiveStrategy:
     def _build_initial_prompt(self, domain_txt: str, problem_txt: str) -> str:
         return (
             "Q:\n"
-            "DOMAIN:\n"
-            f"{domain_txt}\n\n"
-            "PROBLEM:\n"
-            f"{problem_txt}\n\n"
+            "DOMAIN:\n" + domain_txt + "\n\n"
+            "PROBLEM:\n" + problem_txt + "\n\n"
             "A:\n"
         )
 
     def _create_randomizations(self, ground_ops: Dict[str, object]):
         if self._rand_ops_flag:
-            op_names = sorted({op.split()[0] for op in ground_ops.keys()})
-            self._op_subs = _random_aliases(op_names, self._rng)
+            ops = sorted({g.split()[0] for g in ground_ops.keys()})
+            self._op_subs = _random_aliases(ops, self._rng)
         else:
             self._op_subs = {}
         if self._rand_objs_flag:
-            obj_names = set()
-            for canon in ground_ops.keys():
-                toks = canon.split()
-                for t in toks[1:]:
-                    obj_names.add(t)
-            self._obj_subs = _random_aliases(sorted(obj_names), self._rng)
+            objs = set()
+            for c in ground_ops.keys():
+                for t in c.split()[1:]:
+                    objs.add(t)
+            self._obj_subs = _random_aliases(sorted(objs), self._rng)
         else:
             self._obj_subs = {}
 
-    def _randomize_action_for_prompt(self, canonical_action: str) -> str:
-        toks = canonical_action.split()
+    def _randomize_text(self, text: str) -> str:
+        return _apply_subs(_apply_subs(text, self._op_subs), self._obj_subs)
+
+    def _randomize_action_for_prompt(self, canon: str) -> str:
+        toks = canon.split()
         if not toks:
-            return canonical_action
-        op = toks[0]
-        args = toks[1:]
-        op_out = self._op_subs.get(op, op)
-        args_out = [self._obj_subs.get(a, a) for a in args]
-        return _single_wrap(f"{op_out} " + " ".join(args_out))
+            return canon
+        op = self._op_subs.get(toks[0], toks[0])
+        args = [self._obj_subs.get(a, a) for a in toks[1:]]
+        return _single_wrap(" ".join([op] + args))
 
     def _invert_llm_action(self, llm_action_paren: str) -> str:
         return _invert_action(llm_action_paren, self._op_subs, self._obj_subs)
@@ -316,24 +471,18 @@ class LLM4PDDLZeroShotAutoregressiveStrategy:
 
         grounder = ActionGrounder(ground_domain_file, ground_problem_file)
         task = grounder.task
-
         ground_ops: Dict[str, object] = {op.name.strip(): op for op in task.operators}
 
         def applicable(c: str, facts) -> bool:
             return c in ground_ops and ground_ops[c].applicable(facts)
 
         self._create_randomizations(ground_ops)
-        domain_txt_rand = _apply_subs(
-            _apply_subs(domain_txt, self._op_subs), self._obj_subs
-        )
-        problem_txt_rand = _apply_subs(
-            _apply_subs(problem_txt, self._op_subs), self._obj_subs
+        prompt = self._build_initial_prompt(
+            self._randomize_text(domain_txt),
+            self._randomize_text(problem_txt),
         )
 
-        prompt = self._build_initial_prompt(domain_txt_rand, problem_txt_rand)
-
-        plan_display: List[str] = []  # randomized (shown to LLM)
-        plan_canonical: List[str] = []  # original (returned/saved)
+        canonical_plan: List[str] = []
         current_facts = task.initial_state
 
         for step in range(1, (max_steps or 999999) + 1):
@@ -342,11 +491,10 @@ class LLM4PDDLZeroShotAutoregressiveStrategy:
                 print(prompt)
                 print("===== END STEP PROMPT =====\n")
 
-            sys = "Return ONE grounded PDDL plan action (using shown names) and stop at ')'. No commentary."
+            sys = "Return ONE grounded PDDL action (using shown tokens) and stop at ')'. No commentary."
             raw = self._llm.chat(prompt, extra_system=sys, stop=")") or ""
             if not raw.strip().endswith(")"):
                 raw = raw.strip() + ")"
-
             if self._cfg.debug and self._cfg.debug_print_response:
                 print(f"[DEBUG] Raw step {step}:\n{raw}")
 
@@ -359,9 +507,10 @@ class LLM4PDDLZeroShotAutoregressiveStrategy:
             canon = _canonical(self._invert_llm_action(act_rand))
 
             if applicable(canon, current_facts):
-                accepted_canon = canon
+                accepted = canon
                 repaired = False
             else:
+                # pure llm4pddl-style: repair only when invalid/inapplicable
                 candidates = [
                     a for a, op in ground_ops.items() if op.applicable(current_facts)
                 ]
@@ -369,29 +518,27 @@ class LLM4PDDLZeroShotAutoregressiveStrategy:
                     if self._cfg.debug:
                         print("[AR] No applicable actions; stopping.")
                     break
-                accepted_canon = _similarity_best(
+                accepted = _similarity_best(
                     canon, candidates, self._embedder if self._use_embed else None
                 )
                 repaired = True
 
-            if plan_canonical and plan_canonical[-1] == accepted_canon:
+            # Skip exact duplicate
+            if canonical_plan and _canonical(canonical_plan[-1]) == accepted:
                 if self._cfg.debug:
                     print("[AR] Skipping duplicate.")
                 continue
 
-            op_obj = ground_ops[accepted_canon]
-            current_facts = op_obj.apply(current_facts)
-
-            plan_canonical.append(accepted_canon)
-            randomized_action = self._randomize_action_for_prompt(accepted_canon)
-            plan_display.append(randomized_action)
-            prompt += randomized_action + "\n"
+            # Apply
+            current_facts = ground_ops[accepted].apply(current_facts)
+            final = _single_wrap(accepted)
+            canonical_plan.append(final)
+            prompt += self._randomize_action_for_prompt(accepted) + "\n"
 
             if self._cfg.debug and repaired:
-                print(
-                    f"[AR] Repaired '{canon}' -> '{accepted_canon}' (shown as {randomized_action})"
-                )
+                print(f"[AR] Repaired '{canon}' -> '{accepted}'")
 
+            # Early stop on goal
             try:
                 if all(g in current_facts for g in task.goal):
                     if self._cfg.debug:
@@ -400,8 +547,179 @@ class LLM4PDDLZeroShotAutoregressiveStrategy:
             except Exception:
                 pass
 
-            if max_steps and len(plan_canonical) >= max_steps:
+            if max_steps and len(canonical_plan) >= max_steps:
                 break
 
-        # Return canonical actions, single-wrapped, suitable for saving & validation
-        return [_single_wrap(a) for a in plan_canonical]
+        return canonical_plan
+
+
+class OpenLoopSimilarityRepairStrategy:
+    """
+    Single-shot plan generation + post-hoc repair (no heuristics):
+      - Randomization (prompt only, reversible) via env:
+          MAP_PLANNING_RANDOMIZE_OPERATOR_NAMES=1|0
+          MAP_PLANNING_RANDOMIZE_OBJECT_NAMES=1|0
+          MAP_PLANNING_RANDOM_SEED=<int>
+      - Single LLM call to produce multi-line plan
+      - For each line: invert aliases -> canonical; if applicable -> accept; else repair to most similar applicable
+      - Early stop on goal satisfaction
+      - Returns canonical plan (single-wrapped) suitable for validation
+    """
+
+    def __init__(
+        self, llm: LLMPrompt, config, embed_model: str = "paraphrase-MiniLM-L6-v2"
+    ):
+        self._llm = llm
+        self._cfg = config
+
+        # Embedding similarity (optional)
+        self._use_embed = _HAS_ST
+        self._embedder = None
+        if self._use_embed:
+            try:
+                self._embedder = SentenceTransformer(embed_model)
+                if self._cfg.debug:
+                    print(f"[REPAIR] Loaded embedding model: {embed_model}")
+            except Exception as e:
+                if self._cfg.debug:
+                    print("[REPAIR] Embed model load failed; difflib fallback:", e)
+                self._use_embed = False
+
+        # Randomization flags
+        self._rand_ops_flag = os.getenv(
+            "MAP_PLANNING_RANDOMIZE_OPERATOR_NAMES", "0"
+        ).lower() in {"1", "true", "yes", "on"}
+        self._rand_objs_flag = os.getenv(
+            "MAP_PLANNING_RANDOMIZE_OBJECT_NAMES", "0"
+        ).lower() in {"1", "true", "yes", "on"}
+        seed_env = os.getenv("MAP_PLANNING_RANDOM_SEED", "0")
+        try:
+            self._rand_seed = int(seed_env)
+        except ValueError:
+            self._rand_seed = 0
+
+        self._rng = Random(self._rand_seed)
+        self._op_subs: Dict[str, str] = {}
+        self._obj_subs: Dict[str, str] = {}
+
+    def _create_randomizations(self, ground_ops: Dict[str, object]):
+        if self._rand_ops_flag:
+            ops = sorted({g.split()[0] for g in ground_ops.keys()})
+            self._op_subs = _random_aliases(ops, self._rng)
+        else:
+            self._op_subs = {}
+        if self._rand_objs_flag:
+            objs = set()
+            for c in ground_ops.keys():
+                toks = c.split()
+                for t in toks[1:]:
+                    objs.add(t)
+            self._obj_subs = _random_aliases(sorted(objs), self._rng)
+        else:
+            self._obj_subs = {}
+
+    def _randomize_text(self, text: str) -> str:
+        return _apply_subs(_apply_subs(text, self._op_subs), self._obj_subs)
+
+    def _invert_llm_action(self, llm_action_paren: str) -> str:
+        return _invert_action(llm_action_paren, self._op_subs, self._obj_subs)
+
+    def generate_plan(
+        self,
+        ma_domain_file: str,
+        ma_problem_file: str,
+        ground_domain_file: str,
+        ground_problem_file: str,
+        max_steps: int,
+    ) -> List[str]:
+
+        # Read visible (MA) domain/problem
+        domain_txt = Path(ma_domain_file).read_text(encoding="utf-8")
+        problem_txt = Path(ma_problem_file).read_text(encoding="utf-8")
+
+        # Ground centralized (or original fallback) domain/problem
+        grounder = ActionGrounder(ground_domain_file, ground_problem_file)
+        task = grounder.task
+        ground_ops: Dict[str, object] = {op.name.strip(): op for op in task.operators}
+
+        def applicable(canon: str, facts) -> bool:
+            return canon in ground_ops and ground_ops[canon].applicable(facts)
+
+        # Randomize prompt text (LLM-facing only)
+        self._create_randomizations(ground_ops)
+        prompt = (
+            "You are an expert PDDL planner.\n"
+            "Produce a valid sequential plan (one grounded action per line).\n"
+            "Format: (operator arg1 arg2 ...)\n"
+            "No explanations.\n\n"
+            f"DOMAIN:\n{self._randomize_text(domain_txt)}\n\n"
+            f"PROBLEM:\n{self._randomize_text(problem_txt)}\n\nPLAN:\n"
+        )
+
+        if self._cfg.debug and getattr(self._cfg, "debug_print_prompt", True):
+            print("\n===== OPEN-LOOP REPAIR PROMPT =====")
+            print(prompt)
+            print("===== END PROMPT =====\n")
+
+        raw = self._llm.chat(prompt) or ""
+        if self._cfg.debug and getattr(self._cfg, "debug_print_response", True):
+            print("[DEBUG] Raw open-loop response:\n" + raw)
+
+        raw_actions = re.findall(r"\([^\(\)]+\)", raw)
+        if self._cfg.debug:
+            print(f"[REPAIR] Extracted {len(raw_actions)} raw action strings.")
+
+        current_facts = task.initial_state
+        repaired_plan: List[str] = []
+        steps = 0
+
+        for raw_act in raw_actions:
+            if max_steps and steps >= max_steps:
+                break
+            steps += 1
+
+            # Invert randomization to canonical before checks
+            canon = _canonical(self._invert_llm_action(raw_act))
+            if not canon:
+                continue
+
+            if applicable(canon, current_facts):
+                accepted = canon
+                status = "ok"
+            else:
+                # NO heuristics: repair among all applicable actions (no category preference)
+                applicable_pool = [
+                    a for a, op in ground_ops.items() if op.applicable(current_facts)
+                ]
+                if not applicable_pool:
+                    if self._cfg.debug:
+                        print("[REPAIR] Dead end; stopping.")
+                    break
+                accepted = _similarity_best(
+                    canon, applicable_pool, self._embedder if self._use_embed else None
+                )
+                status = "repaired"
+
+            # Apply
+            op_obj = ground_ops.get(accepted)
+            if not op_obj:
+                if self._cfg.debug:
+                    print(f"[REPAIR] Missing operator object for {accepted}")
+                continue
+
+            current_facts = op_obj.apply(current_facts)
+            repaired_plan.append(_single_wrap(accepted))
+
+            if self._cfg.debug:
+                print(f"[REPAIR] Step {steps}: {status} -> {repaired_plan[-1]}")
+
+            # Early stop on goal
+            try:
+                if all(g in current_facts for g in task.goal):
+                    if self._cfg.debug:
+                        print("[REPAIR] Goal satisfied; stopping.")
+                    break
+            except Exception:
+                pass
+
+        return repaired_plan
