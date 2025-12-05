@@ -1,17 +1,15 @@
+"""LLM client for chat completion."""
+
 import json
 from typing import Optional, Union, List
 import requests
 
 
-class LLMPrompt:
+class LLMClient:
     """
-    Simple LLM client for Ollama's /api/chat (default), with fallback to OpenAI-like responses.
+    Client for LLM inference via Ollama API.
 
-    Pass either:
-      - Base URL:  "http://localhost:11434"
-      - Full URL:  "http://localhost:11434/api/chat"
-
-    The class normalizes to a single /api/chat endpoint without duplication.
+    Supports Ollama's /api/chat endpoint with fallback handling.
     """
 
     def __init__(
@@ -22,19 +20,33 @@ class LLMPrompt:
         max_tokens: int = 128,
         timeout: int = 120,
         debug: bool = False,
-        system_prompt: Optional[
-            str
-        ] = "You are a PDDL planning assistant. Respond ONLY with plan actions. No explanations.",
+        system_prompt: Optional[str] = None,
     ):
+        """
+        Initialize LLM client.
+
+        Args:
+            model: Model name (e.g., "llama3:8b")
+            url: Base URL or full chat endpoint URL
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens to generate
+            timeout: Request timeout in seconds
+            debug: Enable debug logging
+            system_prompt: Default system prompt
+        """
         self.model = model
         self.url = url.rstrip("/")
         self.temperature = float(temperature)
         self.max_tokens = int(max_tokens)
         self.timeout = int(timeout)
         self.debug = bool(debug)
-        self.system_prompt = system_prompt
+        self.system_prompt = system_prompt or (
+            "You are a PDDL planning assistant. "
+            "Respond ONLY with plan actions. No explanations."
+        )
 
     def _chat_endpoint(self) -> str:
+        """Get the chat endpoint URL."""
         u = self.url
         if u.endswith("/api/chat"):
             return u
@@ -46,15 +58,25 @@ class LLMPrompt:
         self,
         user_prompt: str,
         extra_system: Optional[str] = None,
-        stop: Optional[Union[str, List[str]]] = None,  # NEW: stop tokens
+        stop: Optional[Union[str, List[str]]] = None,
     ) -> Optional[str]:
+        """
+        Send a chat request to the LLM.
+
+        Args:
+            user_prompt: User message content
+            extra_system: Optional system prompt override
+            stop: Optional stop tokens (string or list)
+
+        Returns:
+            Assistant response text, or None on failure
+        """
         sys_prompt = extra_system if extra_system is not None else self.system_prompt
 
         options = {
             "temperature": self.temperature,
             "num_predict": self.max_tokens,
         }
-        # Ollama supports "stop" as string or list of strings
         if stop:
             options["stop"] = [stop] if isinstance(stop, str) else stop
 
@@ -70,40 +92,31 @@ class LLMPrompt:
 
         endpoint = self._chat_endpoint()
         if self.debug:
-            print(f"POST {endpoint}")
-            print(
-                f"model: {self.model}, temperature: {self.temperature}, max_tokens: {self.max_tokens}, stream: False"
-            )
+            print(f"[LLM] POST {endpoint}")
+            print(f"[LLM] Model: {self.model}, Temp: {self.temperature}")
 
         try:
             resp = requests.post(endpoint, json=payload, timeout=self.timeout)
             resp.raise_for_status()
         except requests.RequestException as e:
             if self.debug:
-                print(f"[LLM ERROR] HTTP request failed: {e}")
-            try:
-                resp = requests.post(self.url, json=payload, timeout=self.timeout)
-                resp.raise_for_status()
-            except requests.RequestException as e2:
-                if self.debug:
-                    print(f"[LLM ERROR] Fallback HTTP request failed: {e2}")
-                return None
+                print(f"[LLM ERROR] Request failed: {e}")
+            return None
 
         try:
             data = resp.json()
         except Exception:
             if self.debug:
                 print("[LLM ERROR] Failed to parse JSON response")
-                print((resp.text or "")[:500])
             return None
 
-        # Ollama response
+        # Extract content from Ollama response
         msg = data.get("message", {})
         content = msg.get("content")
         if isinstance(content, str) and content.strip():
             return content
 
-        # OpenAI-like fallback
+        # Fallback to OpenAI-like response format
         choices = data.get("choices")
         if isinstance(choices, list) and choices:
             cmsg = choices[0].get("message", {})
@@ -112,9 +125,5 @@ class LLMPrompt:
                 return ccontent
 
         if self.debug:
-            print("[LLM ERROR] Could not extract assistant content from response JSON")
-            try:
-                print(json.dumps(data, indent=2)[:1000])
-            except Exception:
-                print(str(data)[:1000])
+            print("[LLM ERROR] Could not extract content from response")
         return None

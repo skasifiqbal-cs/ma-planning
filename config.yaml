@@ -1,0 +1,61 @@
+# MA-PDDL Planning Configuration
+# 
+# To change LLM: Edit 'provider' and 'model' below, uncomment the provider you want
+# To use custom config: python src/cli/main.py --config my_config.yaml ...
+
+llm:
+  # === Active Configuration ===
+  provider: groq
+  model: llama-3.3-70b-versatile
+  temperature: 0.0             # 0.0 = deterministic, 0.5 = balanced, 1.0 = creative
+  max_tokens: 2048             # Increase if plans are getting cut off (was: null = uses provider default)
+  # api_key: null               # Set here or via GROQ_API_KEY environment variable
+  
+  # === Other Providers (uncomment to use) ===
+  # Groq (free API - requires: GROQ_API_KEY in .env or MAP_PLANNING_LLM_API_KEY env var)
+  # provider: groq
+  # api_key: your-groq-api-key  # Or set via environment: export GROQ_API_KEY=...
+  # Available models: llama-3.3-70b-versatile, mixtral-8x7b-32768, llama-3.2-90b-vision-preview, etc.
+  # See: https://console.groq.com/docs/models
+  
+  # Ollama (local - no API key needed)
+  # provider: ollama
+  # model: llama3:8b
+  # url: http://localhost:11434
+  
+  # OpenAI (requires: OPENAI_API_KEY environment variable)
+  # provider: openai
+  # model: gpt-4
+  # model: gpt-3.5-turbo
+  
+  # Anthropic Claude (requires: ANTHROPIC_API_KEY environment variable)
+  # provider: anthropic
+  # model: claude-3-5-sonnet-20241022
+  
+  # HuggingFace (requires: HUGGINGFACE_API_KEY environment variable)
+  # provider: huggingface
+  # model: meta-llama/Llama-2-70b-chat-hf
+  
+  # Azure OpenAI (requires: AZURE_OPENAI_API_KEY environment variable)
+  # provider: azure
+  # model: your-deployment-name
+
+# Planning Settings
+planning:
+  strategy: no-val              # no-val, autoregressive, repair, randomized
+  max_steps: 50                 # Maximum plan length
+  validate: true                # Validate plans with VAL
+  state_based_validation: true  # Filter actions by preconditions & state (set to false for old behavior)
+  
+# Paths (auto-detected if null)
+paths:
+  val_bin: null                 # Path to VAL Validate binary
+  converter_script: null        # Path to MA-PDDL converter
+  python2_cmd: null             # Python 2 command
+
+# Output
+output:
+  results_dir: results          # Where to save plans
+  log_level: INFO               # DEBUG, INFO, WARNING, ERROR
+  verbose: true                # Verbose output
+  debug_prompts: false          # Set to true to print full prompts sent to LLM

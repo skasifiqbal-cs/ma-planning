@@ -1,0 +1,3 @@
+# Minimal dependencies for core functionality
+pyperplan
+requests

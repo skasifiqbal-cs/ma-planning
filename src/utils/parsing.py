@@ -1,3 +1,5 @@
+"""Plan parsing utilities."""
+
 import re
 from typing import List, Set
 
@@ -6,7 +8,15 @@ ACTION_REGEX = re.compile(r"\([^\(\)]+\)")
 
 
 def extract_parenthesized_actions(text: str) -> List[str]:
-    """Extract all parenthesized tokens that look like actions, in order."""
+    """
+    Extract all parenthesized tokens that look like actions.
+
+    Args:
+        text: Raw text to parse
+
+    Returns:
+        List of action strings
+    """
     if not text:
         return []
     return [m.group(0).strip() for m in ACTION_REGEX.finditer(text)]
@@ -18,11 +28,15 @@ def parse_actions_no_validation(
     disable_name_checks: bool = False,
 ) -> List[str]:
     """
-    No Validation parsing:
-    - Scan entire LLM response for parenthesized action strings.
-    - If disable_name_checks is False, keep only those that match a known grounded operator name.
-      (No applicability checks.)
-    - If True, accept all parenthesized strings as actions.
+    Parse actions without validation.
+
+    Args:
+        text: Raw text from LLM
+        valid_ground_ops: Set of valid grounded operator names
+        disable_name_checks: If True, skip operator name validation
+
+    Returns:
+        List of action strings
     """
     actions = extract_parenthesized_actions(text)
     if disable_name_checks:
