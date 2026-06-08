@@ -1,0 +1,12 @@
+services:
+  plan:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - ./results:/app/results       # persist experiment outputs on host
+      - ./config.yaml:/app/config.yaml  # edit config without rebuilding
+    # Usage:
+    #   docker compose run --rm plan plan --domain-dir centralized/rovers --problem-file p01 --validate
+    #   docker compose run --rm plan experiment --root-dir centralized/ --domains rovers
+    #   docker compose run --rm plan analyze

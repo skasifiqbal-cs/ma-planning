@@ -1,0 +1,3 @@
+(define (problem depotprob5646) (:domain depot)
+(:agents driver1 driver0)
+)

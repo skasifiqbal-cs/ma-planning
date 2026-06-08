@@ -1,12 +1,15 @@
-venv
+venv/
 __pycache__/
 *.pyc
 *.pyo
 .env
 results/
 logs/
+agent_plans/
+fmap_results/
+fmap_results_test/
+results_maplan/
 .vscode/
-**/centralized/
 eval/
 *.egg-info/
 .pytest_cache/
@@ -16,4 +19,3 @@ dist/
 build/
 *.plan
 *.log
-legacy/

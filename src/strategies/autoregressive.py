@@ -35,6 +35,8 @@ class LLM4PDDLZeroShotAutoregressiveStrategy(PlanGenerationStrategy):
         self.llm = llm
         self.config = config
         self.embed_model = embed_model
+        # Store raw LLM output for logging
+        self.last_raw_output = None
         # TODO: Initialize state tracker
         # TODO: Initialize validator
         # TODO: Load embedding model

@@ -38,7 +38,7 @@ class MAPLLMPipeline:
         mode: str = "no-val",
         max_steps: int = 0,
         validate_after: bool = False,
-    ) -> Tuple[List[str], Path, Path, Path]:
+    ) -> Tuple[List[str], Path, Path, Path, str]:
         """
         Run the planning pipeline.
 
@@ -51,7 +51,7 @@ class MAPLLMPipeline:
             validate_after: Whether to validate the plan
 
         Returns:
-            Tuple of (plan_actions, plan_path, centralized_domain_path, centralized_problem_path)
+            Tuple of (plan_actions, plan_path, centralized_domain_path, centralized_problem_path, raw_llm_output)
         """
         base_dir = Path(domain_dir)
         domain_name = base_dir.name
@@ -73,6 +73,8 @@ class MAPLLMPipeline:
             mode=mode,
             llm=self.llm,
             config=self.config,
+            mode_name=mode,
+            domain_name=domain_name,
         )
 
         plan = strategy.generate_plan(
@@ -115,7 +117,20 @@ class MAPLLMPipeline:
             if self.config.debug:
                 print(f"[PIPELINE] Validation: {'PASSED' if ok else 'FAILED'}")
 
-        return plan, plan_path, centralized_domain_path, centralized_problem_path
+        # Get raw LLM output, prompt messages, and attempt count from strategy
+        raw_output = getattr(strategy, "last_raw_output", "")
+        self.last_prompt_messages = getattr(strategy, "last_prompt_messages", None)
+        self.validation_attempts = getattr(strategy, "validation_attempts", [])
+        self.num_attempts = len(self.validation_attempts)
+        self.total_tokens = getattr(self.llm, "total_usage", {})
+
+        return (
+            plan,
+            plan_path,
+            centralized_domain_path,
+            centralized_problem_path,
+            raw_output,
+        )
 
     def _resolve_input_file(self, base_dir: Path, base_name: str) -> Path:
         """Resolve input file path, checking with and without .pddl extension."""

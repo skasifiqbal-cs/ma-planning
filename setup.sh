@@ -1,93 +1,57 @@
 #!/bin/bash
-# Installation script for MA-Planning
+# Setup script for MA-PDDL Planning framework
+# Run once after cloning: bash setup.sh
 
 set -e
+cd "$(dirname "$0")"
 
-echo "========================================="
-echo "MA-Planning Setup Script"
-echo "========================================="
+echo "=== MA-PDDL Planning Setup ==="
 
-# Create virtual environment if it doesn't exist
+# ── Python venv ────────────────────────────────────────────────────────────────
 if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
+    echo "[1/4] Creating virtual environment..."
     python3 -m venv venv
 fi
-
-# Activate virtual environment
-echo "Activating virtual environment..."
 source venv/bin/activate
+pip install --quiet --upgrade pip
+pip install --quiet -r requirements.txt
+echo "[1/4] Python dependencies installed."
 
-# Install Python dependencies
-echo "Installing Python dependencies..."
-pip install --upgrade pip
-pip install -r requirements.txt
-
-# Install package in editable mode
-echo "Installing ma-planning in editable mode..."
-pip install -e .
-
-# Clone and build VAL if not present
-if [ ! -d "VAL" ]; then
-    echo "Cloning VAL..."
-    git clone https://github.com/KCL-Planning/VAL.git
-    cd VAL
-    echo "Building VAL..."
-    make
-    cd ..
+# ── Build VAL validator ────────────────────────────────────────────────────────
+VAL_BIN="VAL/build/bin/Validate"
+if [ ! -f "$VAL_BIN" ]; then
+    echo "[2/4] Building VAL validator (requires cmake, g++)..."
+    if ! command -v cmake &>/dev/null; then
+        echo "  ERROR: cmake not found. Install with: sudo apt install cmake g++"
+        exit 1
+    fi
+    mkdir -p VAL/build
+    cmake -S VAL -B VAL/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0057=NEW 2>/dev/null
+    cmake --build VAL/build --config Release --parallel
+    echo "[2/4] VAL built at $VAL_BIN"
 else
-    echo "VAL already exists, skipping..."
+    echo "[2/4] VAL already built."
 fi
 
-# Clone CoDMAP if not present
-if [ ! -d "codmap-2015" ]; then
-    echo "Cloning CoDMAP..."
-    git clone https://github.com/AI-Planning/codmap-2015.git
-    cd codmap-2015
-    echo "Building CoDMAP..."
-    make
-    cd ..
-else
-    echo "CoDMAP already exists, skipping..."
-fi
-
-# Create necessary directories
-echo "Creating directories..."
-mkdir -p centralized
+# ── Directories ────────────────────────────────────────────────────────────────
 mkdir -p results
-mkdir -p plans
-mkdir -p tools
+echo "[3/4] Directories ready."
 
-# Setup environment variables from .env
-echo "Setting up environment variables..."
+# ── API keys ───────────────────────────────────────────────────────────────────
 if [ ! -f ".env" ]; then
-    echo "Creating .env file from .env.example..."
     cp .env.example .env
-    echo "⚠ Please edit .env and add your API keys"
+    echo "[4/4] Created .env from .env.example — edit it to add your API keys."
+else
+    echo "[4/4] .env already exists."
 fi
 
-# Source .env file
-set -a
-[ -f .env ] && source .env
-set +a
-
 echo ""
-echo "========================================="
-echo "Setup complete!"
-echo "========================================="
+echo "=== Setup complete ==="
 echo ""
-echo "To activate the environment, run:"
-echo "  source venv/bin/activate"
+echo "Next steps:"
+echo "  1. Edit .env and add your API key (e.g. GROQ_API_KEY)"
+echo "  2. source venv/bin/activate"
+echo "  3. python run.py plan --domain-dir centralized/rovers --problem-file p01 --validate"
 echo ""
-echo "API Key Setup:"
-echo "  1. Edit .env and add your GROQ_API_KEY (https://console.groq.com/keys)"
-echo "  2. Optional: Add OPENAI_API_KEY, ANTHROPIC_API_KEY, etc."
-echo "  3. Run: source .env"
-echo ""
-echo "To run planning with Groq, use:"
-echo "  python src/cli/main.py --domain-dir centralized/gripper --problem-file prob01.pddl"
-echo ""
-echo "To run planning with Ollama (local):"
-echo "  1. Update config.yaml: provider: ollama"
-echo "  2. Run: ollama serve &"
-echo "  3. Run: python src/cli/main.py --domain-dir centralized/gripper --problem-file prob01.pddl"
-echo ""
+echo "Quick test (no API key needed — checks imports and config):"
+echo "  python -c \"from src.core.config import Config; c = Config.from_yaml(); print('Config OK:', c.strategy)\""

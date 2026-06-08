@@ -7,9 +7,48 @@ from typing import List, Set
 ACTION_REGEX = re.compile(r"\([^\(\)]+\)")
 
 
+def compress_pddl(
+    text: str, strip_comments: bool = True, compact_whitespace: bool = True
+) -> str:
+    """
+    Compress PDDL text to reduce token count.
+
+    Args:
+        text: PDDL text to compress
+        strip_comments: Remove semicolon comments
+        compact_whitespace: Reduce multiple spaces/newlines to single spaces
+
+    Returns:
+        Compressed PDDL text
+    """
+    if strip_comments:
+        # Remove semicolon comments (but preserve the content before them)
+        lines = []
+        for line in text.split("\n"):
+            # Find semicolon not inside strings/parentheses
+            comment_pos = line.find(";")
+            if comment_pos >= 0:
+                line = line[:comment_pos]
+            if line.strip():
+                lines.append(line)
+        text = "\n".join(lines)
+
+    if compact_whitespace:
+        # Replace multiple spaces with single space
+        text = re.sub(r"[ \t]+", " ", text)
+        # Replace multiple newlines with single newline
+        text = re.sub(r"\n\s*\n+", "\n", text)
+        # Remove spaces around parentheses to save tokens
+        text = re.sub(r"\s*\(\s*", "(", text)
+        text = re.sub(r"\s*\)\s*", ")", text)
+        text = text.strip()
+
+    return text
+
+
 def extract_parenthesized_actions(text: str) -> List[str]:
     """
-    Extract all parenthesized tokens that look like actions.
+    Extract all parenthesized tokens that look like actions, with fallback to line-based parsing.
 
     Args:
         text: Raw text to parse
@@ -19,7 +58,32 @@ def extract_parenthesized_actions(text: str) -> List[str]:
     """
     if not text:
         return []
-    return [m.group(0).strip() for m in ACTION_REGEX.finditer(text)]
+
+    # First try parenthesized format: (action_name arg1 arg2 ...)
+    actions = [m.group(0).strip() for m in ACTION_REGEX.finditer(text)]
+
+    # If no parenthesized actions found, try line-based format (one action per line)
+    # This handles LLM output that omits parentheses
+    if not actions:
+        lines = text.strip().split("\n")
+        for line in lines:
+            line = line.strip()
+            # Skip empty lines and lines that don't look like actions
+            if (
+                not line
+                or line.startswith(";")
+                or line.startswith("WARNING")
+                or "WARNING" in line
+            ):
+                continue
+            # If line starts with a word followed by arguments, wrap it in parens
+            # This is a simple heuristic: action names are typically lowercase with hyphens
+            tokens = line.split()
+            if tokens and ("-" in tokens[0] or tokens[0].islower()):
+                # Looks like an action line; wrap it
+                actions.append(f"({line})")
+
+    return actions
 
 
 def parse_actions_no_validation(

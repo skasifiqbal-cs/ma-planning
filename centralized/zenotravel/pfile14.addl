@@ -1,0 +1,3 @@
+(define (problem ZTRAVEL-5-10) (:domain zeno-travel)
+(:agents plane4 plane5 plane1 plane2 plane3)
+)

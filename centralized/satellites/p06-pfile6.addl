@@ -1,0 +1,3 @@
+(define (problem strips-sat-x-1) (:domain satellite)
+(:agents satellite2 satellite1 satellite0)
+)

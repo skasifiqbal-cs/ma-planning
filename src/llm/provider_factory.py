@@ -58,7 +58,7 @@ class ProviderFactory:
         Create an LLM provider.
 
         Args:
-            provider: Provider name (ollama, openai, groq, anthropic, azure, huggingface)
+            provider: Provider name (ollama, openai, deepseek, groq, anthropic, azure, huggingface)
             model: Model identifier
             temperature: Sampling temperature
             max_tokens: Maximum tokens to generate
@@ -103,6 +103,13 @@ def _register_providers():
         pass
 
     try:
+        from .providers.deepseek_provider import DeepSeekProvider
+
+        ProviderRegistry.register("deepseek", DeepSeekProvider)
+    except ImportError:
+        pass
+
+    try:
         from .providers.anthropic_provider import AnthropicProvider
 
         ProviderRegistry.register("anthropic", AnthropicProvider)
@@ -120,6 +127,14 @@ def _register_providers():
         from .providers.huggingface_provider import HuggingFaceProvider
 
         ProviderRegistry.register("huggingface", HuggingFaceProvider)
+    except ImportError:
+        pass
+
+    try:
+        from .providers.google_provider import GoogleProvider
+
+        ProviderRegistry.register("google", GoogleProvider)
+        ProviderRegistry.register("gemini", GoogleProvider)
     except ImportError:
         pass
 

@@ -77,6 +77,28 @@ def _register_providers():
     except ImportError:
         pass
 
+    try:
+        from .google_provider import GoogleProvider
+
+        LLMProviderRegistry.register("google", GoogleProvider)
+        LLMProviderRegistry.register("gemini", GoogleProvider)
+    except ImportError:
+        pass
+
+    try:
+        from .deepseek_provider import DeepSeekProvider
+
+        LLMProviderRegistry.register("deepseek", DeepSeekProvider)
+    except ImportError:
+        pass
+
+    try:
+        from .groq_provider import GroqProvider
+
+        LLMProviderRegistry.register("groq", GroqProvider)
+    except ImportError:
+        pass
+
 
 _register_providers()
 

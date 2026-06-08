@@ -1,123 +1,244 @@
 # MA-PDDL Planning with LLMs
 
-**Research-ready framework** for multi-agent PDDL planning using Large Language Models.
+Research framework for comparing planning approaches (LLM-based, classical, hybrid) on multi-agent PDDL benchmarks.
 
-## ✨ Highlights
+## Setup
 
-- 🤖 **6 LLM Providers** - OpenAI, Anthropic, Groq, Ollama, HuggingFace, Azure
-- 🎯 **4 Planning Strategies** - No-validation, autoregressive, repair, randomized
-- 📝 **6 Prompt Templates** - Zero-shot, few-shot, chain-of-thought, ReAct, and more
-- 🧪 **Experiment Tracking** - Log all runs, export to CSV, analyze with pandas
-- ⚙️ **Simple Config** - One YAML file with commented examples for all providers
-- 🔧 **Extensible** - Add providers/strategies/prompts in minutes
-- ✅ **Clean & Organized** - Minimal files, clear structure, focused docs
+### Option A — Docker (recommended, no local dependencies)
 
-## 🚀 Quick Start
-
-### Installation
 ```bash
-./setup.sh
+git clone <repo-url>
+cd ma-planning
+cp .env.example .env       # then add your API key
+docker compose build       # builds VAL and installs Python deps (~2 min first time)
+```
+
+Run experiments:
+```bash
+docker compose run --rm plan plan --domain-dir centralized/rovers --problem-file p01 --validate
+docker compose run --rm plan experiment --root-dir centralized/ --domains rovers logistics00
+docker compose run --rm plan analyze
+```
+
+Results write to `./results/` on your host. `config.yaml` is mounted directly — edit it without rebuilding.
+
+**Requirements:** Docker with Compose plugin. Nothing else.
+
+---
+
+### Option B — Local (Python venv)
+
+```bash
+git clone <repo-url>
+cd ma-planning
+sudo apt install cmake g++     # Ubuntu/Debian — needed to build VAL
+bash setup.sh                  # creates venv, installs deps, builds VAL
 source venv/bin/activate
-pip install -r requirements.txt
 ```
 
-### Configure
-Edit `config.yaml` to set your LLM provider and model:
-
-```yaml
-llm:
-  provider: ollama       # ollama, openai, anthropic, groq, huggingface, azure
-  model: llama3:8b
-  temperature: 0.0       # 0.0=deterministic, 1.0=creative
-```
-
-### Run
+Edit `.env` and add your API key:
 ```bash
-# Start Ollama (if using local LLM)
-ollama serve
-ollama pull llama3:8b
-
-# Run planning
-python src/cli/main.py \
-  --domain-dir centralized/gripper \
-  --problem-file prob01.pddl \
-  --validate
+GROQ_API_KEY=gsk_...   # free at https://console.groq.com/keys
 ```
 
-### Batch Mode
+**Requirements:** Python ≥ 3.10, `cmake`, `g++`.
+
+## Usage
+
+All workflows go through `run.py`:
+
 ```bash
-# Run all problems in a domain
-python src/cli/main.py \
-  --domain-dir centralized/gripper \
-  --batch \
-  --validate
+# Single problem
+python run.py plan --domain-dir centralized/rovers --problem-file p01 --validate
+
+# All problems in one domain
+python run.py batch --domain-dir centralized/rovers --validate
+
+# Full experiment: subset of domains
+python run.py experiment --domains rovers logistics00 --max-problems 18
+
+# Full experiment: all domains in a directory
+python run.py experiment --root-dir centralized/
+
+# Resume a crashed experiment (skips already-completed problems)
+python run.py experiment --root-dir centralized/ --resume --run-id 20260608_143022_llmmodulo_groq-llama70b_r2_fs0
+
+# Classical planners (separate tools)
+python experiments/run_fmap_batch.py --domain logistics00 --num-problems 20
+python experiments/run_maplan_batch.py --domain blocks --num-problems 20
+
+# Aggregate all results to CSV
+python run.py analyze
 ```
 
-### Use Different Config
-```bash
-# Create custom config
-cp config.yaml my_experiment.yaml
-# Edit my_experiment.yaml...
-
-# Run with custom config
-python src/cli/main.py \
-  --config my_experiment.yaml \
-  --domain-dir centralized/gripper \
-  --problem-file prob01.pddl
+Each `batch` / `experiment` run writes to a self-contained directory:
 ```
-
-## 🧪 Experiments
-
-Track experiments automatically:
-```python
-from src.utils.experiments import ExperimentTracker
-
-tracker = ExperimentTracker()
-print(tracker.summarize())
-tracker.export_csv('results.csv')
-```
-
-Parameter sweeps:
-```python
-from src.utils.config_manager import ConfigManager
-
-configs = ConfigManager.generate_sweep(
-    base={"strategy": "no-val"},
-    sweep={
-        "llm.model": ["llama3:8b", "mistral"],
-        "llm.temperature": [0.0, 0.5]
-    }
-)
-# Generates 6 configs (2 models × 3 temperatures)
+results/20260608_143022_llmmodulo_groq-llama70b_r2_fs0/
+├── config.yaml          ← exact config snapshot
+├── run_meta.json        ← git commit, strategy, model, timestamp
+├── rovers/
+│   ├── eval.json        ← per-problem results + aggregate stats
+│   └── log.json         ← LLM prompts, raw outputs, validation attempts
+└── logistics00/
+    └── ...
 ```
 
 ## Project Structure
 
 ```
 ma-planning/
-├── src/              # Source code
-│   ├── core/        # Config & pipeline
-│   ├── converters/  # MA-PDDL conversion
-│   ├── llm/         # LLM clients
-│   ├── strategies/  # Planning strategies
-│   ├── validation/  # Plan evaluation
-│   ├── utils/       # Utilities
-│   └── cli/         # CLI entry point
-├── tools/           # External tool wrappers & utilities
-├── docs/            # Documentation
-└── legacy/          # Old files (for reference only)
+├── run.py              ← single entry point for all workflows
+├── config.yaml         ← central configuration
+├── .env.example        ← API key template (copy to .env)
+├── src/                ← library code only
+│   ├── core/           # Config & pipeline
+│   ├── strategies/     # Planning strategies
+│   ├── llm/            # LLM provider abstraction
+│   ├── validation/     # VAL wrapper & plan evaluator
+│   ├── converters/     # MA-PDDL → centralized PDDL
+│   └── evaluation/     # Batch evaluator & logger
+├── experiments/        # Analysis scripts (aggregate_results.py, build_few_shot.py, etc.)
+├── centralized/        # Domain benchmark collection (15+ IPC domains)
+├── results/            # Experiment outputs — one dir per run, config snapshot inside
+├── VAL/                # Bundled VAL validator binary
+├── pyperplan/          # Bundled pyperplan classical planner
+└── codmap-2015/        # Bundled CoDMAP MA-PDDL converter
 ```
 
 ## Configuration
 
-Environment variables:
-```bash
-export MAP_PLANNING_LLM_MODEL="llama3:8b"
-export MAP_PLANNING_LLM_URL="http://localhost:11434"
-export MAP_PLANNING_VALIDATE_BIN="./VAL/Validate"
-export MAP_PLANNING_MAX_STEPS="30"
-export MAP_PLANNING_TEMPERATURE="0.7"
+All settings in `config.yaml`. Key sections:
+
+```yaml
+llm:
+  provider: groq          # groq | openai | anthropic | google | ollama | deepseek
+  model: llama-3.3-70b-versatile
+  temperature: 0.0
+
+planning:
+  strategy: llm-modulo    # llm-modulo | llm-repair | llm-merge | base
+
+llm-modulo:
+  backprompt_max_retries: 2
+
+few_shot:
+  enabled: false
+  count: 2                # examples per domain injected into the prompt
+  examples_file: results/few_shot_examples.json
 ```
+
+Override via environment variables (prefix `MAP_PLANNING_`):
+```bash
+export MAP_PLANNING_LLM_MODEL=llama3:8b
+export MAP_PLANNING_BACKPROMPT_MAX_RETRIES=3
+```
+
+## Planning Strategies
+
+| Strategy | Key | Description |
+|----------|-----|-------------|
+| LLM-Modulo | `llm-modulo` | Generate → validate with VAL → backprompt with errors → retry |
+| LLM-Repair | `llm-repair` | Replace invalid actions with nearest valid ones via embedding similarity |
+| LLM-Merge  | `llm-merge`  | Per-agent subproblems solved by pyperplan, merged by LLM |
+| Base       | `base`       | LLM generates plan, no validation (open-loop baseline) |
+
+Old names (`val-feedback`, `repair`, `decomposition`, `no-val`) still work as aliases.
+
+## Result Schema
+
+### eval.json (per-problem results)
+
+Each entry in `results[]` includes:
+
+| Field | Description |
+|-------|-------------|
+| `problem` | Problem stem |
+| `status` | `"success"` or `"error"` |
+| `num_actions` | Plan length |
+| `validation_passed` | Boolean |
+| `execution_time` | Seconds |
+| `num_attempts` | Validation attempts made (llm-modulo only; 0 for other strategies) |
+| `prompt_tokens` | Tokens in prompt(s) sent to LLM |
+| `completion_tokens` | Tokens in LLM response(s) |
+| `total_tokens` | Total tokens consumed |
+
+The `summary` block adds: `total_retries`, `avg_retries`, `total_prompt_tokens`, `total_completion_tokens`, `total_tokens` across the domain.
+
+### log.json (full trace)
+
+Each problem entry includes LLM prompt messages, raw output, final plan, validation result, timing, and (for llm-modulo) `validation_attempts` — the full per-attempt plan and VAL output.
+
+### run_meta.json
+
+Written alongside `config.yaml` in every run directory:
+```json
+{
+  "run_id": "20260608_143022_llmmodulo_groq-llama70b_r2_fs2",
+  "git_commit": "abc1234",
+  "timestamp": "2026-06-08T14:30:22",
+  "strategy": "llm-modulo",
+  "model": "groq/llama-3.3-70b-versatile",
+  "provider": "groq",
+  "backprompt_max_retries": 2,
+  "few_shot_example_count": 2
+}
+```
+
+### domain_variance_report.csv
+
+Generated by `python run.py analyze`. Columns: Date, Run ID, Model, Domain, N Problems, Coverage, Total Time (s), Avg Plan Length, Avg Retries, Total Tokens, Prompt Tokens, Completion Tokens.
+
+## Few-Shot Workflow
+
+1. **Run zero-shot** to collect solved plans:
+   ```bash
+   python run.py experiment --root-dir centralized/
+   ```
+
+2. **Build example file** — picks the `count` shortest solved problems *per domain*:
+   ```bash
+   python experiments/build_few_shot.py --count 2 --domains rovers logistics00
+   # writes results/few_shot_examples.json
+   ```
+
+3. **Enable few-shot** in `config.yaml`:
+   ```yaml
+   few_shot:
+     enabled: true
+     count: 2
+     examples_file: results/few_shot_examples.json
+   ```
+
+4. **Run experiment** — the runner automatically excludes example problems from the test set per domain (no manual `--max-problems` adjustment needed):
+   ```bash
+   python run.py experiment --root-dir centralized/
+   ```
+
+Examples are injected as alternating `user`/`assistant` turns before the actual problem, with the system prompt explaining their role.
+
+## Extending
+
+**Add a provider:**
+```python
+# src/llm/providers/my_provider.py
+from .base import BaseLLMProvider
+
+class MyProvider(BaseLLMProvider):
+    def chat(self, messages, **kwargs): ...
+    def get_provider_name(self): return "my-provider"
+```
+Register in `src/llm/provider_factory.py`.
+
+**Add a strategy:**
+```python
+# src/strategies/my_strategy.py
+from .base import PlanGenerationStrategy
+
+class MyStrategy(PlanGenerationStrategy):
+    def generate_plan(self, ma_domain_file, ma_problem_file,
+                      ground_domain_file, ground_problem_file, max_steps): ...
+```
+Register in `src/strategies/factory.py`.
 
 ## Python API
 
@@ -125,154 +246,19 @@ export MAP_PLANNING_TEMPERATURE="0.7"
 from src.core.config import Config
 from src.core.pipeline import MAPLLMPipeline
 
-config = Config()
+config = Config.from_yaml("config.yaml")
 config.resolve()
 
 pipeline = MAPLLMPipeline(config)
-plan, path, _, _ = pipeline.run(
-    domain_dir="/path/to/domain",
-    domain_file="domain.pddl",
-    problem_file="problem.pddl",
+plan, plan_path, domain_path, problem_path, raw_output = pipeline.run(
+    domain_dir="centralized/rovers",
+    domain_file="domain",
+    problem_file="p01",
+    mode="llm-modulo",
     validate_after=True,
 )
+
+# For llm-modulo: number of validation attempts made
+num_attempts = pipeline.num_attempts       # validation loops (llm-modulo)
+total_tokens = pipeline.total_tokens      # {"prompt_tokens": N, "completion_tokens": N, "total_tokens": N}
 ```
-
-## 🎓 For Researchers
-
-### Add Your Own LLM Provider (5 min)
-```python
-# src/llm/providers/my_provider.py
-from .base import BaseLLMProvider
-
-class MyProvider(BaseLLMProvider):
-    def chat(self, messages, **kwargs):
-        # Your implementation
-        pass
-    
-    def get_provider_name(self):
-        return "my-provider"
-
-# Register in __init__.py
-LLMProviderRegistry.register("my-provider", MyProvider)
-```
-
-### Add Your Own Strategy (10 min)
-```python
-# src/strategies/my_strategy.py
-from .base import PlanGenerationStrategy
-
-class MyStrategy(PlanGenerationStrategy):
-    def generate_plan(self, domain_pddl, problem_pddl, valid_operators):
-        # Your implementation
-        return plan
-```
-
-### Add Custom Prompts (2 min)
-```python
-from src.llm.prompts import PromptRegistry, PromptTemplate
-
-my_prompt = PromptTemplate(
-    style="zero-shot",
-    system_prompt="You are...",
-    user_template="Problem: {problem}"
-)
-PromptRegistry.register("my-prompt", my_prompt)
-```
-
-## 📚 Documentation
-
-| Guide | Purpose |
-|-------|---------|
-| **[RESEARCH_READY.md](docs/RESEARCH_READY.md)** | Complete feature overview |
-| **[ADDING_COMPONENTS.md](docs/ADDING_COMPONENTS.md)** | How to add LLMs, strategies, prompts |
-| **[EXTENSIBLE_ARCHITECTURE.md](docs/EXTENSIBLE_ARCHITECTURE.md)** | Architecture & design patterns |
-| [COMMANDS.md](docs/COMMANDS.md) | Command reference |
-| [TESTING.md](docs/TESTING.md) | How to test |
-
-## 🧪 Testing
-
-```bash
-# Quick validation
-./run_tests.sh
-
-# Individual tests
-python tests/test_structure.py  # Imports (6/6 passing)
-./tests/smoke_test.sh           # Quick check (4/5 passing)
-python tests/test_planning.py   # End-to-end test
-```
-
-## 🗂️ Architecture
-
-```
-src/
-├── llm/
-│   ├── providers/          # 6 LLM providers (OpenAI, Anthropic, Ollama, etc.)
-│   │   └── __init__.py     # LLMProviderRegistry
-│   └── prompts.py          # PromptRegistry + 6 templates
-│
-├── strategies/             # Planning strategies
-│   ├── factory.py          # StrategyRegistry
-│   ├── no_validation.py    # ✅ Implemented
-│   ├── autoregressive.py   # 📝 Placeholder with guide
-│   ├── repair.py           # 📝 Placeholder with guide
-│   └── randomized.py       # 📝 Placeholder with guide
-│
-├── utils/
-│   ├── experiments.py      # ExperimentTracker
-│   └── config_manager.py   # ConfigManager + parameter sweeps
-│
-└── ... (core, converters, validation, cli)
-```
-
-## 📦 Requirements
-
-### Core
-- Python 3.10+
-- pyperplan
-- requests
-
-### LLM Providers (Optional)
-- `openai>=1.0.0` - For OpenAI (GPT-4, GPT-3.5)
-- `anthropic>=0.18.0` - For Anthropic (Claude)
-- `groq>=0.4.0` - For Groq (free and paid APIs)
-- `huggingface-hub>=0.20.0` - For HuggingFace
-
-### Research Tools
-- `typer[all]>=0.9.0` - Modern CLI
-- `rich>=13.0.0` - Beautiful output
-- `pyyaml>=6.0` - Config files
-- `pandas>=2.0.0` - Analysis
-
-### External Tools
-- [Ollama](https://ollama.ai) - Local LLM runtime (optional)
-- [VAL](https://github.com/KCL-Planning/VAL) - Plan validation
-- [CoDMAP](https://github.com/AI-Planning/codmap-2015) - MA-PDDL converter
-
-## 🎯 What's Included
-
-- ✅ **6 LLM providers** ready to use
-- ✅ **4 planning strategies** (1 implemented, 3 with guides)
-- ✅ **6 prompt templates** registered
-- ✅ **Experiment tracking** system
-- ✅ **Config management** with YAML
-- ✅ **Parameter sweeps** utility
-- ✅ **Test suite** (6/6 passing)
-- ✅ **10 documentation guides**
-- ✅ **Clean architecture** (src/, tools/, docs/, tests/)
-
-## 🤝 Contributing
-
-This is a research framework - we encourage experimentation!
-
-1. **Add new components** - Follow guides in docs/
-2. **Implement placeholders** - autoregressive, repair, randomized strategies
-3. **Share your results** - Track with ExperimentTracker
-4. **Improve docs** - Help others understand your additions
-
-## 📄 License
-
-MIT License - See LICENSE file
-
----
-
-**Built for research. Designed for extensibility. Ready to use.** 🎓🚀

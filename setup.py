@@ -27,7 +27,7 @@ setup(
     python_requires=">=3.10",
     entry_points={
         "console_scripts": [
-            "ma-plan=cli.main:main",
+            "ma-plan=run:main",
         ],
     },
     classifiers=[

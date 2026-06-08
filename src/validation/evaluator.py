@@ -145,6 +145,43 @@ class PlanEvaluator:
         rc = proc.returncode
         out = proc.stdout or ""
         err = proc.stderr or ""
-        ok = rc == 0  # Only rc==0 indicates success
+
+        # Validate can return 0 even for failed plans, so check output text
+        # Look for success/failure indicators in stdout
+        ok = rc == 0
+        if ok:
+            # Check for failure indicators in output
+            out_lower = out.lower()
+            if any(
+                indicator in out_lower
+                for indicator in [
+                    "failed plans:",
+                    "bad plan description",
+                    "plan failed",
+                    "goal not satisfied",
+                    "plan invalid",
+                ]
+            ):
+                ok = False
+            # Also check for explicit success indicators
+            elif "plan executed successfully" in out_lower and "goal" in out_lower:
+                ok = True
 
         return ok, rc, out, err
+
+
+def extract_failure_reason(stdout: str, stderr: str, max_lines: int = 4) -> str:
+    """Return the trailing non-empty VAL output lines as a compact reason."""
+    lines = []
+    for chunk in (stdout, stderr):
+        if not chunk:
+            continue
+        for line in chunk.splitlines():
+            stripped = line.strip()
+            if stripped:
+                lines.append(stripped)
+
+    if not lines:
+        return ""
+
+    return "\n".join(lines[-max_lines:])

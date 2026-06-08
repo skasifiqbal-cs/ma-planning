@@ -27,6 +27,15 @@ class BaseLLMProvider(ABC):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.kwargs = kwargs
+        self.last_usage: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        self.total_usage: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    def _update_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0) -> None:
+        computed_total = total_tokens or (prompt_tokens + completion_tokens)
+        self.last_usage = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": computed_total}
+        self.total_usage["prompt_tokens"] += prompt_tokens
+        self.total_usage["completion_tokens"] += completion_tokens
+        self.total_usage["total_tokens"] += computed_total
 
     @abstractmethod
     def chat(self, messages: List[Dict[str, str]], **kwargs) -> str:

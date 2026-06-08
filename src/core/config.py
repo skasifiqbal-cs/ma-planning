@@ -1,231 +1,195 @@
-"""
-Configuration management for MA-PDDL planning pipeline.
+"""Configuration for MA-PDDL planning pipeline.
 
-Environment Variables:
-  MAP_PLANNING_CONVERTER_SCRIPT
-  MAP_PLANNING_PYTHON_CMD
-  MAP_PLANNING_LLM_MODEL
-  MAP_PLANNING_LLM_URL
-  MAP_PLANNING_VALIDATE_BIN
-  MAP_PLANNING_EMBED_MODEL
-  MAP_PLANNING_CENTRALIZED_ROOT
-  MAP_PLANNING_RESULTS_ROOT
-  MAP_PLANNING_MAX_STEPS
-  MAP_PLANNING_TEMPERATURE
-  MAP_PLANNING_MAX_TOKENS
-  MAP_PLANNING_DEBUG (0/1)
+Environment variable overrides (all prefixed MAP_PLANNING_):
+  LLM_PROVIDER, LLM_MODEL, LLM_URL, LLM_API_KEY
+  VALIDATE_BIN, CONVERTER_SCRIPT, PYTHON_CMD
+  EMBED_MODEL, CENTRALIZED_ROOT, RESULTS_ROOT
+  MAX_STEPS, TEMPERATURE, MAX_TOKENS, STRATEGY
+  BACKPROMPT_MAX_RETRIES, DEBUG (0/1)
 """
 
 import os
-from dataclasses import dataclass, field, asdict
-from pathlib import Path
-from typing import Dict, Any, Optional
 import shutil
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 try:
     import yaml
-
     YAML_AVAILABLE = True
 except ImportError:
     YAML_AVAILABLE = False
 
 
-# Auto-load .env file if it exists
 def _load_env_file():
-    """Load environment variables from .env file in project root."""
     env_file = Path(__file__).parent.parent.parent / ".env"
-    if env_file.exists():
-        try:
-            with open(env_file) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if "=" in line:
-                        key, value = line.split("=", 1)
-                        key = key.strip()
-                        value = value.strip()
-                        # Only set if not already in environment (environment takes precedence)
-                        if key and not os.getenv(key):
-                            os.environ[key] = value
-        except Exception:
-            pass  # Silently fail if .env can't be read
+    if not env_file.exists():
+        return
+    try:
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                if key and not os.getenv(key):
+                    os.environ[key] = value.strip()
+    except Exception:
+        pass
 
 
 _load_env_file()
 
 
-def _get_env(name: str, default: Optional[str] = None) -> Optional[str]:
-    """Return non-empty environment variable value or default."""
-    val = os.getenv(name)
-    if val is None:
-        return default
-    val = val.strip()
+def _env(name: str, default: Optional[str] = None) -> Optional[str]:
+    val = os.getenv(name, "").strip()
     return val if val else default
 
 
-def _to_bool(val: str) -> bool:
-    """Convert string to boolean."""
+def _bool(val: str) -> bool:
     return val.lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass
 class Config:
-    """Configuration for MA-PDDL planning pipeline."""
+    """Runtime configuration for the planning pipeline."""
 
-    # Converter settings
-    converter_script: str = _get_env(
+    # LLM
+    llm_provider: str = _env("MAP_PLANNING_LLM_PROVIDER", "ollama")
+    llm_model: str = _env("MAP_PLANNING_LLM_MODEL", "llama3:8b")
+    llm_url: str = _env("MAP_PLANNING_LLM_URL", "http://localhost:11434")
+    llm_api_key: Optional[str] = _env("MAP_PLANNING_LLM_API_KEY")
+    temperature: float = float(_env("MAP_PLANNING_TEMPERATURE", "0.0"))
+    max_tokens: int = int(_env("MAP_PLANNING_MAX_TOKENS", "8000"))
+
+    # Planning — universal
+    strategy: str = _env("MAP_PLANNING_STRATEGY", "llm-modulo")
+    max_steps: int = int(_env("MAP_PLANNING_MAX_STEPS", "1000"))
+    compress_pddl: bool = True
+    skip_pyperplan: bool = _bool(_env("MAP_PLANNING_SKIP_PYPERPLAN", "0"))
+    show_applicable_operators: bool = False
+
+    # llm-modulo specific
+    backprompt_max_retries: int = int(_env("MAP_PLANNING_BACKPROMPT_MAX_RETRIES", "2"))
+    condense_val_errors: bool = True
+    stop_on_empty_plan: bool = True
+
+    # llm-repair specific
+    action_validation: str = _env("MAP_PLANNING_ACTION_VALIDATION", "repair")
+    embed_model: str = _env("MAP_PLANNING_EMBED_MODEL", "paraphrase-MiniLM-L6-v2")
+
+    # Few-shot
+    use_few_shot: bool = False
+    few_shot_example_count: int = 0
+    few_shot_examples_file: Optional[str] = "results/few_shot_examples.json"
+
+    # Paths
+    val_bin: str = _env("MAP_PLANNING_VALIDATE_BIN", "Validate")
+    converter_script: str = _env(
         "MAP_PLANNING_CONVERTER_SCRIPT",
         "/home/rr/ma-planning/codmap-2015/competition/centalized/ma-to-pddl.py",
     )
-    python_cmd: str = _get_env("MAP_PLANNING_PYTHON_CMD", "python2")
+    python_cmd: str = _env("MAP_PLANNING_PYTHON_CMD", "python3")
+    centralized_root: str = _env("MAP_PLANNING_CENTRALIZED_ROOT", "/home/rr/ma-planning/centralized")
+    results_root: str = _env("MAP_PLANNING_RESULTS_ROOT", "/home/rr/ma-planning/results")
 
-    # LLM settings
-    llm_provider: str = _get_env("MAP_PLANNING_LLM_PROVIDER", "ollama")
-    llm_model: str = _get_env("MAP_PLANNING_LLM_MODEL", "llama3:8b")
-    llm_url: str = _get_env("MAP_PLANNING_LLM_URL", "http://localhost:11434")
-    llm_api_key: Optional[str] = _get_env(
-        "MAP_PLANNING_LLM_API_KEY"
-    )  # For OpenAI, Groq, etc.
+    # Debug (all default off; set via config.yaml debug: section or env MAP_PLANNING_DEBUG=1)
+    debug: bool = _bool(_env("MAP_PLANNING_DEBUG", "0"))
+    debug_prompts: bool = False
+    debug_val_feedback: bool = False
+    show_prompts: bool = False
+    show_llm_output: bool = False
 
-    # Validation
-    val_bin: str = _get_env("MAP_PLANNING_VALIDATE_BIN", "Validate")
-
-    # Embedding model
-    embed_model: str = _get_env("MAP_PLANNING_EMBED_MODEL", "paraphrase-MiniLM-L6-v2")
-
-    # Data roots
-    centralized_root: str = _get_env(
-        "MAP_PLANNING_CENTRALIZED_ROOT", "/home/rr/ma-planning/centralized"
-    )
-    results_root: str = _get_env(
-        "MAP_PLANNING_RESULTS_ROOT", "/home/rr/ma-planning/results"
-    )
-
-    # Planning parameters
-    max_steps: int = int(_get_env("MAP_PLANNING_MAX_STEPS", "30"))
-    temperature: float = float(_get_env("MAP_PLANNING_TEMPERATURE", "0.7"))
-    max_tokens: int = int(_get_env("MAP_PLANNING_MAX_TOKENS", "2048"))
-    state_based_validation: bool = _to_bool(
-        _get_env("MAP_PLANNING_STATE_VALIDATION", "1")
-    )
-
-    # Debug flags
-    debug: bool = _to_bool(_get_env("MAP_PLANNING_DEBUG", "1"))
-    debug_prompts: bool = False  # Set by from_yaml
-
-    # Resolved paths (populated after resolve())
+    # Resolved at runtime by resolve()
     resolved_converter_script: Optional[str] = None
     resolved_python_cmd: Optional[str] = None
     resolved_val_bin: Optional[str] = None
 
-    def resolve(self) -> None:
-        """Resolve and validate all paths and tools."""
-        self._ensure_dirs()
-        self._resolve_converter_script()
-        self._resolve_python_cmd()
-        self._resolve_val_bin()
-
-        if self.debug:
-            print("[CONFIG] All paths resolved successfully:")
-            print(f"  Converter: {self.resolved_converter_script}")
-            print(f"  Python: {self.resolved_python_cmd}")
-            print(f"  Validate: {self.resolved_val_bin}")
+    # ── Loading ────────────────────────────────────────────────────────────────
 
     @classmethod
     def from_yaml(cls, config_file: str = "config.yaml") -> "Config":
-        """Load configuration from YAML file.
-
-        YAML structure:
-            llm:
-              provider: ollama
-              model: llama3:8b
-              temperature: 0.0
-              url: http://localhost:11434
-            planning:
-              strategy: no-val
-              max_steps: 50
-              validate: true
-            paths:
-              val_bin: VAL/build/bin/Validate
-              converter_script: codmap-2015/converters/multi-agent.py
-              python2_cmd: python2
-        """
         if not YAML_AVAILABLE:
-            raise ImportError("PyYAML not installed. Install with: pip install pyyaml")
+            raise ImportError("PyYAML required: pip install pyyaml")
 
         config_path = Path(config_file)
-        config = cls()
+        cfg = cls()
 
         if not config_path.exists():
-            return config
+            return cfg
 
         with open(config_path) as f:
             data = yaml.safe_load(f) or {}
 
-        # LLM settings
+        def _set(section: dict, yaml_key: str, attr: str, cast=None):
+            val = section.get(yaml_key)
+            if val is not None:
+                setattr(cfg, attr, cast(val) if cast else val)
+
         llm = data.get("llm", {})
-        if "provider" in llm:
-            config.llm_provider = llm["provider"]
-        if "model" in llm:
-            config.llm_model = llm["model"]
-        if "url" in llm:
-            config.llm_url = llm["url"]
-        if "api_key" in llm and llm["api_key"] is not None:
-            config.llm_api_key = llm["api_key"]
-        if "temperature" in llm and llm["temperature"] is not None:
-            config.temperature = float(llm["temperature"])
-        if "max_tokens" in llm and llm["max_tokens"] is not None:
-            config.max_tokens = int(llm["max_tokens"])
+        _set(llm, "provider",    "llm_provider")
+        _set(llm, "model",       "llm_model")
+        _set(llm, "url",         "llm_url")
+        _set(llm, "api_key",     "llm_api_key")
+        _set(llm, "temperature", "temperature",  float)
+        _set(llm, "max_tokens",  "max_tokens",   int)
 
-        # Planning settings
         planning = data.get("planning", {})
-        if "max_steps" in planning:
-            config.max_steps = int(planning["max_steps"])
-        if (
-            "state_based_validation" in planning
-            and planning["state_based_validation"] is not None
-        ):
-            config.state_based_validation = bool(planning["state_based_validation"])
+        _set(planning, "strategy",    "strategy",    str)
+        _set(planning, "max_steps",   "max_steps",   int)
+        _set(planning, "compress_pddl", "compress_pddl", bool)
+        _set(planning, "skip_pyperplan", "skip_pyperplan", bool)
+        _set(planning, "show_applicable_operators", "show_applicable_operators", bool)
 
-        # Paths (only override if not None in YAML)
+        # Read strategy-specific section (e.g., llm-modulo:, llm-repair:, etc.)
+        strategy_section = data.get(cfg.strategy, {}) or {}
+        _set(strategy_section, "backprompt_max_retries", "backprompt_max_retries", int)
+        _set(strategy_section, "condense_val_errors",    "condense_val_errors",    bool)
+        _set(strategy_section, "stop_on_empty_plan",     "stop_on_empty_plan",     bool)
+        _set(strategy_section, "action_validation",      "action_validation",      str)
+        _set(strategy_section, "embed_model",            "embed_model",            str)
+
+        fs = data.get("few_shot", {})
+        _set(fs, "enabled",       "use_few_shot",           bool)
+        _set(fs, "count",         "few_shot_example_count", int)
+        _set(fs, "examples_file", "few_shot_examples_file", str)
+
         paths = data.get("paths", {})
-        if "converter_script" in paths and paths["converter_script"] is not None:
-            config.converter_script = paths["converter_script"]
-        if "python2_cmd" in paths and paths["python2_cmd"] is not None:
-            config.python_cmd = paths["python2_cmd"]
-        if "val_bin" in paths and paths["val_bin"] is not None:
-            config.val_bin = paths["val_bin"]
+        _set(paths, "val_bin",           "val_bin")
+        _set(paths, "converter_script",  "converter_script")
+        _set(paths, "python2_cmd",       "python_cmd")
 
-        # Output settings
-        output = data.get("output", {})
-        if "debug_prompts" in output and output["debug_prompts"] is not None:
-            config.debug_prompts = bool(output["debug_prompts"])
+        dbg = data.get("debug", {})
+        _set(dbg, "enabled",        "debug",           bool)
+        _set(dbg, "show_prompts",   "show_prompts",    bool)
+        _set(dbg, "show_llm_output","show_llm_output", bool)
+        _set(dbg, "val_feedback",   "debug_val_feedback", bool)
+        if cfg.debug:
+            cfg.debug_prompts = True
 
-        return config
+        return cfg
 
-    def _ensure_dirs(self) -> None:
-        """Create necessary directories."""
-        for d in [self.centralized_root, self.results_root]:
-            Path(d).mkdir(parents=True, exist_ok=True)
+    # ── Resolution ─────────────────────────────────────────────────────────────
+
+    def resolve(self) -> None:
+        Path(self.results_root).mkdir(parents=True, exist_ok=True)
+        self._resolve_converter_script()
+        self._resolve_python_cmd()
+        self._resolve_val_bin()
 
     def _resolve_converter_script(self) -> None:
-        """Resolve converter script path."""
         script = Path(self.converter_script)
         if script.is_file():
             self.resolved_converter_script = str(script.resolve())
             return
-
-        # Try alternate spelling
         alt = script.parent.parent / "centralized" / script.name
         if alt.is_file():
             self.resolved_converter_script = str(alt.resolve())
             return
-
         raise FileNotFoundError(f"Converter script not found: {script}")
 
     def _resolve_python_cmd(self) -> None:
-        """Resolve Python command."""
         cmd = shutil.which(self.python_cmd)
         if cmd:
             self.resolved_python_cmd = cmd
@@ -233,36 +197,24 @@ class Config:
             raise FileNotFoundError(f"Python command not found: {self.python_cmd}")
 
     def _resolve_val_bin(self) -> None:
-        """Resolve VAL binary."""
         val = Path(self.val_bin)
         if val.is_file():
             self.resolved_val_bin = str(val.resolve())
             return
-
         cmd = shutil.which(self.val_bin)
         if cmd:
             self.resolved_val_bin = cmd
             return
-
-        # Check VAL directory in project
-        val_dir = Path(__file__).parent.parent.parent / "VAL"
-        validate = val_dir / "Validate"
-        if validate.is_file():
-            self.resolved_val_bin = str(validate.resolve())
-            return
-
+        repo_root = Path(__file__).parent.parent.parent
+        for candidate in [
+            repo_root / "VAL" / "build" / "bin" / "Validate",
+            repo_root / "VAL" / "Validate",
+            repo_root / "VAL" / "build" / "linux64" / "Release" / "bin" / "Validate",
+        ]:
+            if candidate.is_file():
+                self.resolved_val_bin = str(candidate.resolve())
+                return
         raise FileNotFoundError(f"Validate binary not found: {self.val_bin}")
 
     def as_dict(self) -> Dict[str, Any]:
-        """Return configuration as dictionary."""
         return asdict(self)
-
-
-if __name__ == "__main__":
-    cfg = Config()
-    try:
-        cfg.resolve()
-        print("[SUCCESS] Configuration resolved")
-        print(f"Config: {cfg.as_dict()}")
-    except Exception as e:
-        print(f"[ERROR] {e}")

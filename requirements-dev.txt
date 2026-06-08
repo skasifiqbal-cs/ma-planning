@@ -1,20 +1,4 @@
-# Development dependencies
 -r requirements.txt
-
-# Testing
 pytest>=7.4.0
 pytest-cov>=4.1.0
-pytest-xdist>=3.5.0    # Parallel test execution
-
-# Code quality
-black>=23.0.0
 ruff>=0.1.0
-mypy>=1.7.0
-isort>=5.13.0
-
-# Documentation
-sphinx>=7.2.0
-sphinx-rtd-theme>=2.0.0
-
-# Pre-commit hooks
-pre-commit>=3.6.0

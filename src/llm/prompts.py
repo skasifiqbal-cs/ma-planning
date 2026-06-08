@@ -1,5 +1,7 @@
 """Prompt template system for various planning approaches."""
 
+import json
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 from enum import Enum
 
@@ -29,9 +31,6 @@ class PromptTemplate:
         """
         Initialize prompt template.
 
-        Args:
-            style: Prompting style
-            system_prompt: System message
             user_template: User message template with {placeholders}
             examples: Example interactions for few-shot learning
         """
@@ -53,7 +52,7 @@ class PromptTemplate:
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
 
-        # Add examples for few-shot
+        # Add examples for few-shot (interleaved user/assistant turns)
         if self.examples and self.style == PromptStyle.FEW_SHOT:
             for example in self.examples:
                 messages.append({"role": "user", "content": example["input"]})
@@ -98,63 +97,41 @@ class PlanningPrompts:
     """Collection of planning-specific prompt templates."""
 
     @staticmethod
-    def zero_shot_planning() -> PromptTemplate:
+    def zero_shot_planning(
+        examples: Optional[List[Dict[str, str]]] = None,
+    ) -> PromptTemplate:
         """Zero-shot planning prompt with preconditions and effects."""
+        style = PromptStyle.FEW_SHOT if examples else PromptStyle.ZERO_SHOT
+        system_base = (
+            "You are an expert PDDL planning agent. Generate valid action sequences.\n\n"
+            "Key rules:\n"
+            "1. Actions require preconditions to be satisfied in the current state\n"
+            "2. Actions modify state via add/delete effects\n"
+            "3. Track state progression: later actions depend on earlier effects\n"
+            "4. For multi-agent problems: Include the agent name after the action name"
+        )
+        if examples:
+            system_base += (
+                f"\n\nThe conversation so far contains {len(examples)} example "
+                "problem(s) and their reference plans. Use them to understand the "
+                "expected format and action style, then solve the new problem."
+            )
         return PromptTemplate(
-            style=PromptStyle.ZERO_SHOT,
-            system_prompt=(
-                "You are an expert AI planning agent. Generate valid action sequences "
-                "for multi-agent PDDL planning problems.\n\n"
-                "IMPORTANT PLANNING CONCEPTS:\n"
-                "1. PRECONDITIONS: Each action has preconditions that MUST be satisfied before "
-                "the action can be executed. Check that the current state includes all required facts.\n"
-                "2. EFFECTS: Each action produces effects that change the state. Some effects ADD "
-                "facts (positive effects), others REMOVE facts (negative effects).\n"
-                "3. STATE PROGRESSION: After each action, the state changes. Later actions can only "
-                "be executed if their preconditions are met in the NEW state (after all previous effects).\n"
-                "4. GOAL: Find a sequence of actions that transforms the initial state into one where "
-                "all goal facts are satisfied.\n\n"
-                "TIPS FOR GOOD PLANS:\n"
-                "- Start by identifying which facts must become true to achieve the goal\n"
-                "- Work backwards: what actions produce those goal facts?\n"
-                "- Check if the preconditions of those actions are met in the initial state\n"
-                "- If preconditions aren't met, recursively find actions to establish them first\n"
-                "- Avoid actions whose negative effects would destroy facts needed later\n"
-                "- Consider action ordering: some actions must be done before others due to dependencies\n"
-                "- For multi-agent problems, ensure agent availability and resource constraints"
-            ),
+            style=style,
+            system_prompt=system_base,
             user_template=(
                 "Domain: {domain}\n\n"
                 "Problem: {problem}\n\n"
-                "PLANNING PROCESS:\n"
-                "1. Identify the goal facts that need to be true\n"
-                "2. Determine which operators (actions) can produce those goal facts\n"
-                "3. For each operator, verify its preconditions are or will be satisfied\n"
-                "4. If preconditions aren't met, find operators to satisfy them first\n"
-                "5. Order the actions considering effect dependencies and agent constraints\n"
-                "6. Verify the final state satisfies ALL goal facts\n\n"
-                "Generate a plan to achieve the goal. Output actions in order, one per line, "
-                "in the format: (action_name arg1 arg2 ...)"
+                "Generate a plan to achieve the goal. Output actions one per line as: (action_name agent_name arg1 arg2 ...)\n"
+                # "For example: (drive-truck d1 truck1 loc1 loc2) or (load-package p1 loc1 truck1)"
             ),
+            examples=examples,
         )
 
     @staticmethod
     def few_shot_planning(examples: List[Dict[str, str]]) -> PromptTemplate:
         """Few-shot planning with examples."""
-        return PromptTemplate(
-            style=PromptStyle.FEW_SHOT,
-            system_prompt=(
-                "You are an expert AI planning agent. Study the examples below, "
-                "then generate a valid plan for the new problem."
-            ),
-            user_template=(
-                "Domain: {domain}\n\n"
-                "Problem: {problem}\n\n"
-                "Generate a plan following the format shown in the examples. "
-                "Output actions as (action_name arg1 arg2 ...), one per line."
-            ),
-            examples=examples,
-        )
+        return PlanningPrompts.zero_shot_planning(examples=examples)
 
     @staticmethod
     def chain_of_thought_planning() -> PromptTemplate:
@@ -168,7 +145,8 @@ class PlanningPrompts:
                 "- PRECONDITIONS: What facts must be true for this action to apply?\n"
                 "- EFFECTS: What facts become true/false after this action?\n"
                 "- STATE TRACKING: Keep track of the current state as you plan\n"
-                "- DEPENDENCY ANALYSIS: Which actions must come before others?"
+                "- DEPENDENCY ANALYSIS: Which actions must come before others?\n"
+                "- AGENT ASSIGNMENT: In multi-agent problems, assign actions to the correct agent"
             ),
             user_template=(
                 "Domain: {domain}\n\n"
@@ -187,7 +165,10 @@ class PlanningPrompts:
                 "   - Avoid actions that remove facts needed by later actions\n"
                 "6. STATE VERIFICATION: Trace through the state after each action\n"
                 "   - Confirm all intermediate states are valid\n"
-                "   - Confirm final state satisfies all goal facts\n\n"
+                "   - Confirm final state satisfies all goal facts\n"
+                "7. AGENT ASSIGNMENT: For multi-agent domains, identify which agent performs each action\n\n"
+                "Output format: (action_name agent_name arg1 arg2 ...)\n"
+                "Example: (drive-truck d1 truck1 loc1 loc2) or (board-truck d1 truck1 loc1)\n\n"
                 "Provide your detailed reasoning, then output the final plan."
             ),
         )
@@ -215,10 +196,13 @@ class PlanningPrompts:
         )
 
     @staticmethod
-    def repair_planning() -> PromptTemplate:
+    def repair_planning(
+        examples: Optional[List[Dict[str, str]]] = None,
+    ) -> PromptTemplate:
         """Plan repair prompt with error analysis."""
+        style = PromptStyle.FEW_SHOT if examples else PromptStyle.ZERO_SHOT
         return PromptTemplate(
-            style=PromptStyle.ZERO_SHOT,
+            style=style,
             system_prompt=(
                 "You are an expert AI planning agent specialized in fixing invalid plans. "
                 "Analyze validation errors and generate a corrected plan.\n\n"
@@ -227,7 +211,8 @@ class PlanningPrompts:
                 "2. MISSING PREREQUISITE ACTIONS: Goal facts need intermediate actions first\n"
                 "3. DESTRUCTIVE EFFECTS: An action removed facts needed later in the plan\n"
                 "4. INCOMPLETE GOAL: The plan doesn't achieve all goal facts\n"
-                "5. ORDERING ISSUES: Actions are in the wrong sequence"
+                "5. ORDERING ISSUES: Actions are in the wrong sequence\n"
+                "6. AGENT ASSIGNMENT ERRORS: Wrong agent assigned to an action in multi-agent problems"
             ),
             user_template=(
                 "Domain: {domain}\n\n"
@@ -235,12 +220,13 @@ class PlanningPrompts:
                 "Previous Plan:\n{previous_plan}\n\n"
                 "Validation Errors:\n{errors}\n\n"
                 "ERROR ANALYSIS:\n"
-                "1. Identify what caused each error (violated precondition, missing action, etc.)\n"
+                "1. Identify what caused each error (violated precondition, missing action, agent mismatch, etc.)\n"
                 "2. Trace through the state: which facts were true/false at each step?\n"
                 "3. Identify which operators should have been used instead\n"
                 "4. Ensure all preconditions are met before each action\n"
-                "5. Ensure no essential facts are removed before they're used\n\n"
-                "Generate a corrected plan that fixes these errors. Output actions as (action_name arg1 arg2 ...), one per line."
+                "5. Ensure no essential facts are removed before they're used\n"
+                "6. Verify correct agent assignment for each action\n\n"
+                "Generate a corrected plan that fixes these errors. Output format: (action_name agent_name arg1 arg2 ...), one per line."
             ),
         )
 
@@ -256,7 +242,8 @@ class PlanningPrompts:
                 "1. PRECONDITIONS: The action's preconditions MUST ALL be satisfied in the current state\n"
                 "2. PROGRESS: Does this action move us closer to any unachieved goal fact?\n"
                 "3. NO HARM: This action should not remove facts that are needed for the goal\n"
-                "4. DEPENDENCIES: Prefer actions that enable other necessary actions later"
+                "4. DEPENDENCIES: Prefer actions that enable other necessary actions later\n"
+                "5. AGENT ASSIGNMENT: Select the correct agent for the action (multi-agent problems)"
             ),
             user_template=(
                 "Domain: {domain}\n\n"
@@ -267,10 +254,101 @@ class PlanningPrompts:
                 "ANALYZE:\n"
                 "- Which operators have preconditions satisfied in the current state?\n"
                 "- Which of those operators produce facts needed for unachieved goals?\n"
-                "- Avoid operators whose negative effects harm goal achievement\n\n"
-                "Output ONLY the next action in the format: (action_name arg1 arg2 ...)"
+                "- Avoid operators whose negative effects harm goal achievement\n"
+                "- For multi-agent domains, identify the correct agent for the selected action\n\n"
+                "Output ONLY the next action in the format: (action_name agent_name arg1 arg2 ...)"
             ),
         )
+
+    @staticmethod
+    def val_feedback_backprompt(
+        examples: Optional[List[Dict[str, str]]] = None,
+    ) -> PromptTemplate:
+        """VAL validation feedback backprompt for plan improvement."""
+        style = PromptStyle.FEW_SHOT if examples else PromptStyle.ZERO_SHOT
+        return PromptTemplate(
+            style=style,
+            system_prompt=(
+                "You are an expert AI planning agent specialized in fixing invalid plans using VAL validation feedback. "
+                "Analyze the validation errors from VAL (Validate tool) and generate a corrected plan.\n\n"
+                "VALIDATION ERROR ANALYSIS:\n"
+                "1. PRECONDITION VIOLATIONS: When VAL reports 'precondition not satisfied' or similar\n"
+                "2. TYPE ERRORS: When arguments don't match expected types\n"
+                "3. GOAL FAILURES: When 'Goal not satisfied' at the end\n"
+                "4. ACTION FAILURES: When specific actions fail to execute\n"
+                "5. STATE INCONSISTENCIES: When the plan leads to invalid states\n\n"
+                "CORRECTION STRATEGIES:\n"
+                "- Add missing prerequisite actions before failed actions\n"
+                "- Fix type mismatches in action parameters\n"
+                "- Ensure all goal conditions are explicitly achieved\n"
+                "- Remove or reorder actions that cause conflicts\n"
+                "- For multi-agent problems, verify correct agent assignments"
+            ),
+            user_template=(
+                "Domain: {domain}\n\n"
+                "Problem: {problem}\n\n"
+                "Previous Plan (INVALID):\n{previous_plan}\n\n"
+                "VAL Validation Output:\n{validation_output}\n\n"
+                "ANALYSIS: Study the validation output above to understand what went wrong.\n"
+                "Look for specific error messages like 'precondition not satisfied', 'Goal not satisfied', "
+                "or action execution failures.\n\n"
+                "Generate a corrected plan that fixes the validation errors. "
+                "Output actions one per line as: (action_name agent_name arg1 arg2 ...)\n"
+                "Ensure the new plan is complete and achieves all goals."
+            ),
+            examples=examples,
+        )
+
+    @staticmethod
+    def load_few_shot_examples(
+        file_path: Optional[str], limit: Optional[int] = None, domain: Optional[str] = None
+    ) -> List[Dict[str, str]]:
+        """Load few-shot examples from a JSON file and optionally filter by domain.
+
+        Returns a list of example dicts containing at least `input` and `output`.
+        If examples in the file include `domain`/`problem` metadata it is preserved
+        so callers can filter or inspect it.
+        """
+        if not file_path:
+            return []
+
+        path = Path(file_path)
+        if not path.is_file():
+            return []
+
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+
+        if isinstance(payload, dict):
+            examples = payload.get("examples", [])
+        else:
+            examples = payload
+
+        if not isinstance(examples, list):
+            return []
+
+        filtered: List[Dict[str, str]] = []
+        for item in examples:
+            if not isinstance(item, dict):
+                continue
+            input_text = item.get("input")
+            output_text = item.get("output")
+            ex_domain = item.get("domain")
+            ex_problem = item.get("problem")
+            if isinstance(input_text, str) and isinstance(output_text, str):
+                # If domain filter provided, only include matching examples
+                if domain is None or (isinstance(ex_domain, str) and ex_domain == domain):
+                    entry = {"input": input_text, "output": output_text}
+                    # preserve metadata if present
+                    if ex_domain:
+                        entry["domain"] = ex_domain
+                    if ex_problem:
+                        entry["problem"] = ex_problem
+                    filtered.append(entry)
+
+        if limit is not None and limit > 0:
+            return filtered[:limit]
+        return filtered
 
 
 class PromptRegistry:

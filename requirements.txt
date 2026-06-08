@@ -1,25 +1,13 @@
-# Core dependencies
-pyperplan
-requests
+# Core
+pyyaml>=6.0
+typer[all]>=0.9.0
+rich>=13.0.0
 
-# LLM providers (optional - install as needed)
-openai>=1.0.0          # For OpenAI, Groq (via OpenAI-compatible API), and Azure
-anthropic>=0.18.0      # For Anthropic (Claude)
-huggingface-hub>=0.20.0  # For HuggingFace models
+# LLM providers — install the ones you use
+openai>=1.0.0              # Groq, OpenAI, Azure, DeepSeek (all OpenAI-compatible)
+anthropic>=0.18.0          # Anthropic (Claude)
+google-generativeai>=0.5.0 # Google Gemini
+huggingface-hub>=0.20.0    # HuggingFace
 
-# Embeddings and similarity
+# Embeddings (required for llm-repair strategy only)
 sentence-transformers
-
-# CLI and UI
-typer[all]>=0.9.0      # Modern CLI
-rich>=13.0.0           # Beautiful terminal output
-
-# Configuration and data
-pyyaml>=6.0            # YAML config files
-pandas>=2.0.0          # Experiment tracking and analysis
-
-# Development and testing
-pytest>=7.4.0          # Testing framework
-pytest-cov>=4.1.0      # Coverage reports
-black>=23.0.0          # Code formatting
-ruff>=0.1.0            # Fast linter
