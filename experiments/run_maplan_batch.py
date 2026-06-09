@@ -12,10 +12,10 @@ and corresponding `problem*.addl` files), this script:
 The script is resumable: if a problem has an existing validated plan, it is skipped.
 
 Usage example:
- python tools/evaluate_maplan_batch.py \
-   --maplan-root /home/rr/maplan \
-   --bench-root /home/rr/ma-planning/centralized \
-   --val-bin /home/rr/ma-planning/VAL/build/linux64/Release/bin/Validate
+ python experiments/run_maplan_batch.py \
+   --maplan-root /path/to/maplan \
+   --bench-root centralized \
+   --domains rovers zenotravel
 
 """
 
@@ -34,13 +34,14 @@ from typing import List, Optional, Tuple
 import json
 import time
 
-DEFAULT_MAPLAN_ROOT = Path("/home/rr/maplan")
-DEFAULT_TRANSLATOR = Path("/home/rr/maplan/third-party/translate/translate.py")
-DEFAULT_PLANNER = Path("/home/rr/maplan/bin/search")
-DEFAULT_BENCH_ROOT = Path("/home/rr/ma-planning/centralized")
+_REPO_ROOT = Path(__file__).parent.parent
+DEFAULT_MAPLAN_ROOT = Path("maplan")                         # install maplan here, or pass --maplan-root
+DEFAULT_TRANSLATOR = Path("maplan/third-party/translate/translate.py")
+DEFAULT_PLANNER = Path("maplan/bin/search")
+DEFAULT_BENCH_ROOT = _REPO_ROOT / "centralized"
 DEFAULT_OUTPUT_ROOT = Path("results_maplan")
 DEFAULT_LOGS_ROOT = Path("logs")
-DEFAULT_VAL_BIN = Path("/home/rr/ma-planning/VAL/build/linux64/Release/bin/Validate")
+DEFAULT_VAL_BIN: Path | None = None                          # auto-detected from VAL/build/bin/Validate
 DEFAULT_TIMEOUT_TRANSLATE = 360
 DEFAULT_TIMEOUT_PLAN = 3600
 DEFAULT_MEMORY_MB = 8192  # 8 GB
@@ -458,7 +459,11 @@ def main(argv: List[str] | None = None) -> int:
     bench_root = args.bench_root.resolve()
     output_root = args.output_root.resolve()
     logs_root = args.logs_root.resolve()
-    val_bin = args.val_bin if args.val_bin and args.val_bin.exists() else None
+    _auto_val = _REPO_ROOT / "VAL" / "build" / "bin" / "Validate"
+    val_bin = (
+        (args.val_bin if args.val_bin and args.val_bin.exists() else None)
+        or (_auto_val if _auto_val.is_file() else None)
+    )
     timeout_translate = args.timeout_translate
     timeout_plan = args.timeout_plan
     memory_mb = args.memory_mb
