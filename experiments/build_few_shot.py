@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--unfactored-root",
         type=Path,
-        default=Path("/home/rr/Downloads/pddl-data-master/codmap-2015/unfactored"),
+        default=Path(__file__).parent.parent / "domains" / "unfactored",
         help="Root containing unfactored MA-PDDL domain/problem files",
     )
     parser.add_argument(

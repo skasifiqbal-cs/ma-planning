@@ -49,11 +49,12 @@ from src.validation.evaluator import (  # noqa: E402
     extract_failure_reason,
 )
 
-DEFAULT_FMAP_ROOT = Path("/home/rr/Downloads/altorler-fmap-2ce663469695")
-DEFAULT_FACTORED_ROOT = Path("/home/rr/Downloads/pddl-data-master/codmap-2015/factored")
-DEFAULT_VALIDATION_ROOT = Path("/home/rr/ma-planning/centralized")
+_REPO_ROOT = Path(__file__).parent.parent
+DEFAULT_FMAP_ROOT = Path("fmap")                          # place FMAP.jar here, or pass --fmap-root
+DEFAULT_FACTORED_ROOT = _REPO_ROOT / "domains" / "factored"
+DEFAULT_VALIDATION_ROOT = _REPO_ROOT / "centralized"
 DEFAULT_OUTPUT_ROOT = Path("fmap_results")
-DEFAULT_VAL_BIN = Path("/home/rr/ma-planning/VAL/build/linux64/Release/bin/Validate")
+DEFAULT_VAL_BIN: Path | None = None                       # auto-detected from VAL/build/bin/Validate
 DEFAULT_SEARCH = 0
 DEFAULT_HEURISTIC = 2
 DEFAULT_TIMEOUT = 5400
@@ -122,9 +123,10 @@ class FMAPBatchEvaluator:
         self.fmap_jar = (self.fmap_root / "FMAP.jar").resolve()
         self.factored_root = factored_root.resolve()
         self.output_root = output_root.resolve()
+        _auto_val = _REPO_ROOT / "VAL" / "build" / "bin" / "Validate"
         self.val_bin = (
-            val_bin.resolve() if val_bin else None
-        ) or DEFAULT_VAL_BIN.resolve()
+            val_bin.resolve() if val_bin and val_bin.is_file() else None
+        ) or (_auto_val if _auto_val.is_file() else None)
         self.validation_root = validation_root.resolve()
         self.search = search
         self.heuristic = heuristic
