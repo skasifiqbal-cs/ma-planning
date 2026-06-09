@@ -1,0 +1,17 @@
+; Hdtg = 0, Hlan = 0
+; Hdtg = 6, Hlan = 5
+; Hdtg = 4, Hlan = 4
+; Hdtg = 3, Hlan = 3
+; Hdtg = 2, Hlan = 2
+; Hdtg = 1, Hlan = 1
+; Hdtg = 0, Hlan = 0
+
+; Solution plan - CoDMAP Distributed format
+; -----------------------------------------
+1: (do-glaze glazer0 p2 red)
+0: (do-grind grinder0 p0 smooth red varnished colourfragments)
+2: (do-immersion-varnish immersion-varnisher0 p1 natural smooth)
+0: (do-plane planer0 p2 verysmooth natural varnished)
+1: (do-plane planer0 p1 rough natural untreated)
+0: (do-saw-medium saw0 b0 p1 pine rough s3 s2 s1)
+; Stopping...

@@ -40,6 +40,10 @@ paths:
   val_bin: null                        # auto-detected from VAL/ directory
   converter_script: null               # auto-detected from codmap-2015/
   python2_cmd: python3
+  domain_root: domains/unfactored       # override to point at a larger dataset
+  factored_root: domains/factored       # used by fmap experiments
+  centralized_root: centralized         # converter writes output here; LLMs never read this
+  results_root: results
 
 debug:
   enabled: false

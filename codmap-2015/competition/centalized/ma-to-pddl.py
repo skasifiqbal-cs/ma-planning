@@ -503,7 +503,7 @@ class PlanningProblem(object):
     if len(array)%3 != 0:
       print("Expected predicate to be typed " + str(array))
       sys.exit()
-    for i in range(0, len(array)/3):
+    for i in range(0, len(array)//3):
       if array[3*i+1] != '-':
         print("Expected predicate to be typed")
         sys.exit()

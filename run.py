@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """MA-PDDL Planning — single entry point for all workflows.
 
-  python run.py plan       --domain-dir centralized/rovers --problem-file p01 --validate
-  python run.py batch      --domain-dir centralized/rovers --validate
-  python run.py experiment --root-dir centralized/ --domains rovers logistics00
+  python run.py plan       --domain-dir /path/to/unfactored/rovers --problem-file p01 --validate
+  python run.py batch      --domain-dir /path/to/unfactored/rovers --validate
+  python run.py experiment --domains rovers logistics00   # root-dir from config.yaml paths.domain_root
   python run.py analyze
 """
 
@@ -307,7 +307,7 @@ def plan(
 
     effective_mode = mode or cfg.strategy
     run_id = _make_run_id(cfg)
-    run_dir = Path("results") / run_id
+    run_dir = Path(cfg.results_root) / run_id
 
     if verbose:
         logger.info(f"Run: {run_id}")
@@ -354,7 +354,7 @@ def batch(
 
     effective_mode = mode or cfg.strategy
     run_id = run_id_override or _make_run_id(cfg)
-    run_dir = Path("results") / run_id
+    run_dir = Path(cfg.results_root) / run_id
 
     _save_run_meta(run_dir, run_id, cfg, config_file)
 
@@ -364,10 +364,10 @@ def batch(
 
 @app.command()
 def experiment(
-    root_dir: Path = typer.Option(
-        Path("/home/rr/Downloads/pddl-data-master/codmap-2015/unfactored/"),
+    root_dir: Optional[Path] = typer.Option(
+        None,
         "--root-dir",
-        help="Root dir with domain subdirs",
+        help="Root dir containing domain subdirs (unfactored MA-PDDL). Falls back to paths.domain_root in config.yaml.",
     ),
     domain_file: str = typer.Option("domain.pddl", "--domain-file"),
     mode: Optional[str] = typer.Option(None, "--mode", "-m"),
@@ -388,9 +388,16 @@ def experiment(
         logger.error(f"Config error: {e}")
         raise typer.Exit(1)
 
+    if root_dir is None:
+        if cfg.domain_root:
+            root_dir = Path(cfg.domain_root)
+        else:
+            logger.error("No --root-dir given and paths.domain_root not set in config.yaml")
+            raise typer.Exit(1)
+
     effective_mode = mode or cfg.strategy
     run_id = run_id_override or _make_run_id(cfg)
-    run_dir = Path("results") / run_id
+    run_dir = Path(cfg.results_root) / run_id
 
     domain_dirs = sorted(
         d for d in root_dir.iterdir()

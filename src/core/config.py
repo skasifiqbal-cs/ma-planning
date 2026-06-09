@@ -86,13 +86,12 @@ class Config:
 
     # Paths
     val_bin: str = _env("MAP_PLANNING_VALIDATE_BIN", "Validate")
-    converter_script: str = _env(
-        "MAP_PLANNING_CONVERTER_SCRIPT",
-        "/home/rr/ma-planning/codmap-2015/competition/centalized/ma-to-pddl.py",
-    )
+    converter_script: str = _env("MAP_PLANNING_CONVERTER_SCRIPT", "")
     python_cmd: str = _env("MAP_PLANNING_PYTHON_CMD", "python3")
-    centralized_root: str = _env("MAP_PLANNING_CENTRALIZED_ROOT", "/home/rr/ma-planning/centralized")
-    results_root: str = _env("MAP_PLANNING_RESULTS_ROOT", "/home/rr/ma-planning/results")
+    domain_root: str = _env("MAP_PLANNING_DOMAIN_ROOT", "domains/unfactored")
+    factored_root: str = _env("MAP_PLANNING_FACTORED_ROOT", "domains/factored")
+    centralized_root: str = _env("MAP_PLANNING_CENTRALIZED_ROOT", "centralized")
+    results_root: str = _env("MAP_PLANNING_RESULTS_ROOT", "results")
 
     # Debug (all default off; set via config.yaml debug: section or env MAP_PLANNING_DEBUG=1)
     debug: bool = _bool(_env("MAP_PLANNING_DEBUG", "0"))
@@ -159,6 +158,10 @@ class Config:
         _set(paths, "val_bin",           "val_bin")
         _set(paths, "converter_script",  "converter_script")
         _set(paths, "python2_cmd",       "python_cmd")
+        _set(paths, "domain_root",       "domain_root")
+        _set(paths, "factored_root",     "factored_root")
+        _set(paths, "centralized_root",  "centralized_root")
+        _set(paths, "results_root",      "results_root")
 
         dbg = data.get("debug", {})
         _set(dbg, "enabled",        "debug",           bool)
@@ -179,15 +182,16 @@ class Config:
         self._resolve_val_bin()
 
     def _resolve_converter_script(self) -> None:
-        script = Path(self.converter_script)
-        if script.is_file():
-            self.resolved_converter_script = str(script.resolve())
-            return
-        alt = script.parent.parent / "centralized" / script.name
-        if alt.is_file():
-            self.resolved_converter_script = str(alt.resolve())
-            return
-        raise FileNotFoundError(f"Converter script not found: {script}")
+        repo_root = Path(__file__).parent.parent.parent
+        candidates = [
+            Path(self.converter_script) if self.converter_script else None,
+            repo_root / "codmap-2015" / "competition" / "centalized" / "ma-to-pddl.py",
+        ]
+        for c in candidates:
+            if c and c.is_file():
+                self.resolved_converter_script = str(c.resolve())
+                return
+        raise FileNotFoundError("Converter script not found; set MAP_PLANNING_CONVERTER_SCRIPT")
 
     def _resolve_python_cmd(self) -> None:
         cmd = shutil.which(self.python_cmd)

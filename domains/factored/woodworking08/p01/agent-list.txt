@@ -1,0 +1,7 @@
+glazer0 127.0.0.1
+grinder0 127.0.0.1
+highspeed-saw0 127.0.0.1
+immersion-varnisher0 127.0.0.1
+planer0 127.0.0.1
+saw0 127.0.0.1
+spray-varnisher0 127.0.0.1
