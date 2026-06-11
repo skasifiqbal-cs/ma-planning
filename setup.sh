@@ -8,11 +8,11 @@ cd "$(dirname "$0")"
 echo "=== MA-PDDL Planning Setup ==="
 
 # ── Python venv ────────────────────────────────────────────────────────────────
-if [ ! -d "venv" ]; then
-    echo "[1/4] Creating virtual environment..."
-    python3 -m venv venv
-fi
-source venv/bin/activate
+# if [ ! -d "venv" ]; then
+#     echo "[1/4] Creating virtual environment..."
+#     python3 -m venv venv
+# fi
+# source venv/bin/activate
 pip install --quiet --upgrade pip
 pip install --quiet -r requirements.txt
 echo "[1/4] Python dependencies installed."
