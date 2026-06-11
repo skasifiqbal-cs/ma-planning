@@ -39,31 +39,20 @@ def _register_strategies():
     StrategyRegistry.register("no-val",   BaseStrategy)   # alias
     StrategyRegistry.register("open-loop", BaseStrategy)  # alias
 
-    # llm-modulo: generate → validate with VAL → backprompt with errors → retry
-    try:
-        from .llm_modulo import LLMModuloStrategy
-        StrategyRegistry.register("llm-modulo",  LLMModuloStrategy)
-        StrategyRegistry.register("val-feedback", LLMModuloStrategy)  # alias
-        StrategyRegistry.register("backprompt",   LLMModuloStrategy)  # alias
-    except ImportError:
-        pass
+    # Core strategies — not optional; ImportError here is a bug, not a missing feature
+    from .llm_modulo import LLMModuloStrategy
+    StrategyRegistry.register("llm-modulo",   LLMModuloStrategy)
+    StrategyRegistry.register("val-feedback", LLMModuloStrategy)
+    StrategyRegistry.register("backprompt",   LLMModuloStrategy)
 
-    # llm-repair: similarity-based action repair using embeddings
-    try:
-        from .llm_repair import LLMRepairStrategy
-        StrategyRegistry.register("llm-repair", LLMRepairStrategy)
-        StrategyRegistry.register("repair",     LLMRepairStrategy)  # alias
-    except ImportError:
-        pass
+    from .llm_repair import LLMRepairStrategy
+    StrategyRegistry.register("llm-repair", LLMRepairStrategy)
+    StrategyRegistry.register("repair",     LLMRepairStrategy)
 
-    # llm-merge: per-agent decomposition via pyperplan + LLM merges subplans
-    try:
-        from .llm_merge import LLMMergeStrategy
-        StrategyRegistry.register("llm-merge",    LLMMergeStrategy)
-        StrategyRegistry.register("decomposition", LLMMergeStrategy)  # alias
-        StrategyRegistry.register("multi-agent",   LLMMergeStrategy)  # alias
-    except ImportError:
-        pass
+    from .llm_merge import LLMMergeStrategy
+    StrategyRegistry.register("llm-merge",     LLMMergeStrategy)
+    StrategyRegistry.register("decomposition", LLMMergeStrategy)
+    StrategyRegistry.register("multi-agent",   LLMMergeStrategy)
 
     # ── Secondary strategies (kept but not primary focus) ─────────────────────
     try:
